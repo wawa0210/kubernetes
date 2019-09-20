@@ -108,7 +108,6 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/algorithm/predicates"
 	"k8s.io/kubernetes/pkg/security/apparmor"
 	sysctlwhitelist "k8s.io/kubernetes/pkg/security/podsecuritypolicy/sysctl"
-	utildbus "k8s.io/kubernetes/pkg/util/dbus"
 	utilipt "k8s.io/kubernetes/pkg/util/iptables"
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/util/oom"
@@ -515,7 +514,7 @@ func NewMainKubelet(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 		nodeIPValidator:                         validateNodeIP,
 		clock:                                   clock.RealClock{},
 		enableControllerAttachDetach:            kubeCfg.EnableControllerAttachDetach,
-		iptClient:                               utilipt.New(utilexec.New(), utildbus.New(), protocol),
+		iptClient:                               utilipt.New(utilexec.New(), protocol),
 		makeIPTablesUtilChains:                  kubeCfg.MakeIPTablesUtilChains,
 		iptablesMasqueradeBit:                   int(kubeCfg.IPTablesMasqueradeBit),
 		iptablesDropBit:                         int(kubeCfg.IPTablesDropBit),
@@ -1406,9 +1405,9 @@ func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
 	}
 	go wait.Until(kl.updateRuntimeUp, 5*time.Second, wait.NeverStop)
 
-	// Start loop to sync iptables util rules
+	// Set up iptables util rules
 	if kl.makeIPTablesUtilChains {
-		go wait.Until(kl.syncNetworkUtil, 1*time.Minute, wait.NeverStop)
+		kl.initNetworkUtil()
 	}
 
 	// Start a goroutine responsible for killing pods (that are not properly
