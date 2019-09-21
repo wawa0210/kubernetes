@@ -323,7 +323,13 @@ func NewProxier(ipt utiliptables.Interface,
 	}
 	burstSyncs := 2
 	klog.V(3).Infof("minSyncPeriod: %v, syncPeriod: %v, burstSyncs: %d", minSyncPeriod, syncPeriod, burstSyncs)
-	proxier.syncRunner = async.NewBoundedFrequencyRunner("sync-runner", proxier.syncProxyRules, minSyncPeriod, syncPeriod, burstSyncs)
+	// We pass syncPeriod to ipt.Monitor, which will call us only if it needs to.
+	// We need to pass *some* maxInterval to NewBoundedFrequencyRunner anyway though.
+	// time.Hour is arbitrary.
+	proxier.syncRunner = async.NewBoundedFrequencyRunner("sync-runner", proxier.syncProxyRules, minSyncPeriod, time.Hour, burstSyncs)
+	go ipt.Monitor(utiliptables.Chain("KUBE-PROXY-CANARY"),
+		[]utiliptables.Table{utiliptables.TableMangle, utiliptables.TableNAT, utiliptables.TableFilter},
+		proxier.syncProxyRules, syncPeriod, wait.NeverStop)
 	return proxier, nil
 }
 
@@ -505,7 +511,11 @@ func (proxier *Proxier) OnServiceDelete(service *v1.Service) {
 func (proxier *Proxier) OnServiceSynced() {
 	proxier.mu.Lock()
 	proxier.servicesSynced = true
-	proxier.setInitialized(proxier.endpointsSynced || proxier.endpointSlicesSynced)
+	if utilfeature.DefaultFeatureGate.Enabled(features.EndpointSlice) {
+		proxier.setInitialized(proxier.endpointSlicesSynced)
+	} else {
+		proxier.setInitialized(proxier.endpointsSynced)
+	}
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
@@ -537,7 +547,7 @@ func (proxier *Proxier) OnEndpointsDelete(endpoints *v1.Endpoints) {
 func (proxier *Proxier) OnEndpointsSynced() {
 	proxier.mu.Lock()
 	proxier.endpointsSynced = true
-	proxier.setInitialized(proxier.servicesSynced && proxier.endpointsSynced)
+	proxier.setInitialized(proxier.servicesSynced)
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
@@ -573,7 +583,7 @@ func (proxier *Proxier) OnEndpointSliceDelete(endpointSlice *discovery.EndpointS
 func (proxier *Proxier) OnEndpointSlicesSynced() {
 	proxier.mu.Lock()
 	proxier.endpointSlicesSynced = true
-	proxier.setInitialized(proxier.servicesSynced && proxier.endpointSlicesSynced)
+	proxier.setInitialized(proxier.servicesSynced)
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
@@ -675,7 +685,7 @@ func (proxier *Proxier) syncProxyRules() {
 	defer proxier.mu.Unlock()
 
 	// don't sync rules till we've received services and endpoints
-	if !proxier.endpointsSynced || !proxier.servicesSynced {
+	if !proxier.isInitialized() {
 		klog.V(2).Info("Not syncing iptables until Services and Endpoints have been received from master")
 		return
 	}
@@ -780,12 +790,20 @@ func (proxier *Proxier) syncProxyRules() {
 	// Install the kubernetes-specific postrouting rules. We use a whole chain for
 	// this so that it is easier to flush and change, for example if the mark
 	// value should ever change.
-	writeLine(proxier.natRules, []string{
+	// NB: THIS MUST MATCH the corresponding code in the kubelet
+	masqRule := []string{
 		"-A", string(kubePostroutingChain),
 		"-m", "comment", "--comment", `"kubernetes service traffic requiring SNAT"`,
 		"-m", "mark", "--mark", proxier.masqueradeMark,
 		"-j", "MASQUERADE",
-	}...)
+	}
+	if proxier.iptables.HasRandomFully() {
+		masqRule = append(masqRule, "--random-fully")
+		klog.V(3).Info("Using `--random-fully` in the MASQUERADE rule for iptables")
+	} else {
+		klog.V(2).Info("Not using `--random-fully` in the MASQUERADE rule for iptables because the local version of iptables does not support it")
+	}
+	writeLine(proxier.natRules, masqRule...)
 
 	// Install the kubernetes-specific masquerade mark rule. We use a whole chain for
 	// this so that it is easier to flush and change, for example if the mark

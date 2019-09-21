@@ -39,6 +39,7 @@ import (
 	netutil "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/sets"
 	versionutil "k8s.io/apimachinery/pkg/util/version"
+	kubeadmversion "k8s.io/component-base/version"
 	"k8s.io/klog"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
@@ -46,7 +47,6 @@ import (
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/initsystem"
 	utilruntime "k8s.io/kubernetes/cmd/kubeadm/app/util/runtime"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/system"
-	kubeadmversion "k8s.io/kubernetes/cmd/kubeadm/app/version"
 	"k8s.io/kubernetes/pkg/registry/core/service/ipallocator"
 	utilsexec "k8s.io/utils/exec"
 	utilsnet "k8s.io/utils/net"
@@ -431,9 +431,12 @@ func (hst HTTPProxyCheck) Name() string {
 // Check validates http connectivity type, direct or via proxy.
 func (hst HTTPProxyCheck) Check() (warnings, errorList []error) {
 	klog.V(1).Infoln("validating if the connectivity type is via proxy or direct")
-	u := (&url.URL{Scheme: hst.Proto, Host: hst.Host}).String()
+	u := &url.URL{Scheme: hst.Proto, Host: hst.Host}
+	if utilsnet.IsIPv6String(hst.Host) {
+		u.Host = net.JoinHostPort(hst.Host, "1234")
+	}
 
-	req, err := http.NewRequest("GET", u, nil)
+	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		return nil, []error{err}
 	}
