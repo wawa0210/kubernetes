@@ -1,4 +1,4 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "go_default_library",
@@ -6,6 +6,7 @@ go_library(
         "cleanup.go",
         "create.go",
         "exec_util.go",
+        "expect.go",
         "flake_reporting_util.go",
         "framework.go",
         "get-kubemark-resource-usage.go",
@@ -20,6 +21,7 @@ go_library(
         "rc_util.go",
         "resource_usage_gatherer.go",
         "size.go",
+        "skip.go",
         "suites.go",
         "test_context.go",
         "util.go",
@@ -50,7 +52,6 @@ go_library(
         "//staging/src/k8s.io/apimachinery/pkg/runtime/schema:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/intstr:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/net:go_default_library",
-        "//staging/src/k8s.io/apimachinery/pkg/util/rand:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/runtime:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/sets:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/uuid:go_default_library",
@@ -77,7 +78,6 @@ go_library(
         "//staging/src/k8s.io/component-base/version:go_default_library",
         "//test/e2e/framework/ginkgowrapper:go_default_library",
         "//test/e2e/framework/kubelet:go_default_library",
-        "//test/e2e/framework/log:go_default_library",
         "//test/e2e/framework/metrics:go_default_library",
         "//test/e2e/framework/node:go_default_library",
         "//test/e2e/framework/pod:go_default_library",
@@ -89,7 +89,6 @@ go_library(
         "//test/e2e/system:go_default_library",
         "//test/utils:go_default_library",
         "//test/utils/image:go_default_library",
-        "//vendor/github.com/davecgh/go-spew/spew:go_default_library",
         "//vendor/github.com/onsi/ginkgo:go_default_library",
         "//vendor/github.com/onsi/ginkgo/config:go_default_library",
         "//vendor/github.com/onsi/gomega:go_default_library",
@@ -150,4 +149,16 @@ filegroup(
     ],
     tags = ["automanaged"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "go_default_test",
+    srcs = ["log_test.go"],
+    embed = [":go_default_library"],
+    deps = [
+        "//vendor/github.com/onsi/ginkgo:go_default_library",
+        "//vendor/github.com/onsi/ginkgo/config:go_default_library",
+        "//vendor/github.com/onsi/ginkgo/reporters:go_default_library",
+        "//vendor/github.com/onsi/gomega:go_default_library",
+    ],
 )

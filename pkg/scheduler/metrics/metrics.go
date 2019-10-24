@@ -20,8 +20,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"k8s.io/component-base/metrics"
 	"k8s.io/component-base/metrics/legacyregistry"
 	volumeschedulingmetrics "k8s.io/kubernetes/pkg/controller/volume/scheduling/metrics"
@@ -60,11 +58,11 @@ var (
 			StabilityLevel: metrics.ALPHA,
 		}, []string{"result"})
 	// PodScheduleSuccesses counts how many pods were scheduled.
-	PodScheduleSuccesses = scheduleAttempts.With(prometheus.Labels{"result": "scheduled"})
+	PodScheduleSuccesses = scheduleAttempts.With(metrics.Labels{"result": "scheduled"})
 	// PodScheduleFailures counts how many pods could not be scheduled.
-	PodScheduleFailures = scheduleAttempts.With(prometheus.Labels{"result": "unschedulable"})
+	PodScheduleFailures = scheduleAttempts.With(metrics.Labels{"result": "unschedulable"})
 	// PodScheduleErrors counts how many pods could not be scheduled due to a scheduler error.
-	PodScheduleErrors = scheduleAttempts.With(prometheus.Labels{"result": "error"})
+	PodScheduleErrors = scheduleAttempts.With(metrics.Labels{"result": "error"})
 	SchedulingLatency = metrics.NewSummaryVec(
 		&metrics.SummaryOpts{
 			Subsystem: SchedulerSubsystem,
@@ -197,11 +195,13 @@ var (
 			StabilityLevel: metrics.ALPHA,
 		},
 	)
-	PreemptionVictims = metrics.NewGauge(
-		&metrics.GaugeOpts{
-			Subsystem:      SchedulerSubsystem,
-			Name:           "pod_preemption_victims",
-			Help:           "Number of selected preemption victims",
+	PreemptionVictims = metrics.NewHistogram(
+		&metrics.HistogramOpts{
+			Subsystem: SchedulerSubsystem,
+			Name:      "pod_preemption_victims",
+			Help:      "Number of selected preemption victims",
+			// we think #victims>50 is pretty rare, therefore [50, +Inf) is considered a single bucket.
+			Buckets:        metrics.LinearBuckets(5, 5, 10),
 			StabilityLevel: metrics.ALPHA,
 		})
 	PreemptionAttempts = metrics.NewCounter(
@@ -211,7 +211,6 @@ var (
 			Help:           "Total preemption attempts in the cluster till now",
 			StabilityLevel: metrics.ALPHA,
 		})
-
 	pendingPods = metrics.NewGaugeVec(
 		&metrics.GaugeOpts{
 			Subsystem:      SchedulerSubsystem,
@@ -219,6 +218,49 @@ var (
 			Help:           "Number of pending pods, by the queue type. 'active' means number of pods in activeQ; 'backoff' means number of pods in backoffQ; 'unschedulable' means number of pods in unschedulableQ.",
 			StabilityLevel: metrics.ALPHA,
 		}, []string{"queue"})
+	SchedulerGoroutines = metrics.NewGaugeVec(
+		&metrics.GaugeOpts{
+			Subsystem:      SchedulerSubsystem,
+			Name:           "scheduler_goroutines",
+			Help:           "Number of running goroutines split by the work they do such as binding.",
+			StabilityLevel: metrics.ALPHA,
+		}, []string{"work"})
+
+	PodSchedulingDuration = metrics.NewHistogram(
+		&metrics.HistogramOpts{
+			Subsystem:      SchedulerSubsystem,
+			Name:           "pod_scheduling_duration_seconds",
+			Help:           "E2e latency for a pod being scheduled which may include multiple scheduling attempts.",
+			Buckets:        metrics.ExponentialBuckets(0.001, 2, 15),
+			StabilityLevel: metrics.ALPHA,
+		})
+
+	PodSchedulingAttempts = metrics.NewHistogram(
+		&metrics.HistogramOpts{
+			Subsystem:      SchedulerSubsystem,
+			Name:           "pod_scheduling_attempts",
+			Help:           "Number of attempts to successfully schedule a pod.",
+			Buckets:        metrics.ExponentialBuckets(1, 2, 5),
+			StabilityLevel: metrics.ALPHA,
+		})
+
+	FrameworkExtensionPointDuration = metrics.NewHistogramVec(
+		&metrics.HistogramOpts{
+			Subsystem:      SchedulerSubsystem,
+			Name:           "framework_extension_point_duration_seconds",
+			Help:           "Latency for running all plugins of a specific extension point.",
+			Buckets:        nil,
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"extension_point", "status"})
+
+	SchedulerQueueIncomingPods = metrics.NewCounterVec(
+		&metrics.CounterOpts{
+			Subsystem:      SchedulerSubsystem,
+			Name:           "queue_incoming_pods_total",
+			Help:           "Number of pods added to scheduling queues by event and queue type.",
+			StabilityLevel: metrics.ALPHA,
+		}, []string{"queue", "event"})
 
 	metricsList = []metrics.Registerable{
 		scheduleAttempts,
@@ -239,6 +281,11 @@ var (
 		PreemptionVictims,
 		PreemptionAttempts,
 		pendingPods,
+		PodSchedulingDuration,
+		PodSchedulingAttempts,
+		FrameworkExtensionPointDuration,
+		SchedulerQueueIncomingPods,
+		SchedulerGoroutines,
 	}
 )
 
@@ -255,19 +302,24 @@ func Register() {
 	})
 }
 
+// GetGather returns the gatherer. It used by test case outside current package.
+func GetGather() metrics.Gatherer {
+	return legacyregistry.DefaultGatherer
+}
+
 // ActivePods returns the pending pods metrics with the label active
 func ActivePods() metrics.GaugeMetric {
-	return pendingPods.With(prometheus.Labels{"queue": "active"})
+	return pendingPods.With(metrics.Labels{"queue": "active"})
 }
 
 // BackoffPods returns the pending pods metrics with the label backoff
 func BackoffPods() metrics.GaugeMetric {
-	return pendingPods.With(prometheus.Labels{"queue": "backoff"})
+	return pendingPods.With(metrics.Labels{"queue": "backoff"})
 }
 
 // UnschedulablePods returns the pending pods metrics with the label unschedulable
 func UnschedulablePods() metrics.GaugeMetric {
-	return pendingPods.With(prometheus.Labels{"queue": "unschedulable"})
+	return pendingPods.With(metrics.Labels{"queue": "unschedulable"})
 }
 
 // Reset resets metrics

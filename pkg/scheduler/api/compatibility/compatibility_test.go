@@ -19,6 +19,8 @@ package compatibility
 import (
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -31,18 +33,43 @@ import (
 	kubeschedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/core"
-	"k8s.io/kubernetes/pkg/scheduler/factory"
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework/plugins"
 )
 
 func TestCompatibility_v1_Scheduler(t *testing.T) {
+	snapshot := scheduler.RegisteredPredicatesAndPrioritiesSnapshot()
+	defer scheduler.ApplyPredicatesAndPriorities(snapshot)
+
 	// Add serialized versions of scheduler config that exercise available options to ensure compatibility between releases
 	schedulerFiles := map[string]struct {
 		JSON             string
 		wantPredicates   sets.String
 		wantPrioritizers sets.String
+		wantPlugins      map[string][]kubeschedulerconfig.Plugin
 		wantExtenders    []schedulerapi.ExtenderConfig
 	}{
+		// This is a special test for the "composite" predicate "GeneralPredicate". GeneralPredicate is a combination
+		// of predicates, and here we test that if given, it is mapped to the set of plugins that should be executed.
+		"GeneralPredicate": {
+			JSON: `{
+		  "kind": "Policy",
+		  "apiVersion": "v1",
+		  "predicates": [
+			{"name": "GeneralPredicates"}
+                  ],
+		  "priorities": [
+                  ]
+		}`,
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeResourcesFit"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "TaintToleration"},
+				},
+			},
+		},
 		// Do not change this JSON after the corresponding release has been tagged.
 		// A failure indicates backwards compatibility with the specified release was broken.
 		"1.0": {
@@ -64,19 +91,27 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
   ]
 }`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
 				"PodFitsPorts",
-				"NoDiskConflict",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
-				"LeastRequestedPriority",
 				"ServiceSpreadingPriority",
 				"TestServiceAntiAffinity",
 				"TestLabelPreference",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesLeastAllocated", Weight: 1},
+				},
+			},
 		},
 
 		// Do not change this JSON after the corresponding release has been tagged.
@@ -103,22 +138,30 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  ]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsHostPorts",
-				"PodFitsResources",
-				"NoDiskConflict",
-				"HostName",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
 				"TestServiceAntiAffinity",
 				"TestLabelPreference",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+				},
+			},
 		},
 
 		// Do not change this JSON after the corresponding release has been tagged.
@@ -151,28 +194,36 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  ]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
-				"PodFitsHostPorts",
-				"HostName",
-				"NoDiskConflict",
-				"NoVolumeZoneConflict",
-				"MaxEBSVolumeCount",
-				"MaxGCEPDVolumeCount",
-				"MaxAzureDiskVolumeCount",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"NodeAffinityPriority",
-				"ImageLocalityPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
 				"TestServiceAntiAffinity",
 				"TestLabelPreference",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+					{Name: "EBSLimits"},
+					{Name: "GCEPDLimits"},
+					{Name: "AzureDiskLimits"},
+					{Name: "VolumeZone"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "ImageLocality", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+					{Name: "NodeAffinity", Weight: 2},
+				},
+			},
 		},
 
 		// Do not change this JSON after the corresponding release has been tagged.
@@ -189,12 +240,10 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 			{"name": "NoDiskConflict"},
 			{"name": "NoVolumeZoneConflict"},
 			{"name": "PodToleratesNodeTaints"},
-			{"name": "CheckNodeMemoryPressure"},
 			{"name": "MaxEBSVolumeCount"},
 			{"name": "MaxGCEPDVolumeCount"},
 			{"name": "MaxAzureDiskVolumeCount"},
 			{"name": "MatchInterPodAffinity"},
-			{"name": "GeneralPredicates"},
 			{"name": "TestServiceAffinity", "argument": {"serviceAffinity" : {"labels" : ["region"]}}},
 			{"name": "TestLabelsPresence",  "argument": {"labelsPresence"  : {"labels" : ["foo"], "presence":true}}}
 		  ],"priorities": [
@@ -209,32 +258,37 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  ]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
-				"PodFitsHostPorts",
-				"HostName",
-				"NoDiskConflict",
-				"NoVolumeZoneConflict",
-				"PodToleratesNodeTaints",
-				"CheckNodeMemoryPressure",
-				"MaxEBSVolumeCount",
-				"MaxGCEPDVolumeCount",
-				"MaxAzureDiskVolumeCount",
-				"MatchInterPodAffinity",
-				"GeneralPredicates",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"ImageLocalityPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
-				"NodeAffinityPriority",
-				"TaintTolerationPriority",
 				"InterPodAffinityPriority",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+					{Name: "EBSLimits"},
+					{Name: "GCEPDLimits"},
+					{Name: "AzureDiskLimits"},
+					{Name: "VolumeZone"},
+					{Name: "InterPodAffinity"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "ImageLocality", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+					{Name: "NodeAffinity", Weight: 2},
+					{Name: "TaintToleration", Weight: 2},
+				},
+			},
 		},
 
 		// Do not change this JSON after the corresponding release has been tagged.
@@ -251,13 +305,10 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 			{"name": "NoDiskConflict"},
 			{"name": "NoVolumeZoneConflict"},
 			{"name": "PodToleratesNodeTaints"},
-			{"name": "CheckNodeMemoryPressure"},
-			{"name": "CheckNodeDiskPressure"},
 			{"name": "MaxEBSVolumeCount"},
 			{"name": "MaxGCEPDVolumeCount"},
 			{"name": "MaxAzureDiskVolumeCount"},
 			{"name": "MatchInterPodAffinity"},
-			{"name": "GeneralPredicates"},
 			{"name": "TestServiceAffinity", "argument": {"serviceAffinity" : {"labels" : ["region"]}}},
 			{"name": "TestLabelsPresence",  "argument": {"labelsPresence"  : {"labels" : ["foo"], "presence":true}}}
 		  ],"priorities": [
@@ -274,35 +325,39 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  ]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
-				"PodFitsHostPorts",
-				"HostName",
-				"NoDiskConflict",
-				"NoVolumeZoneConflict",
-				"PodToleratesNodeTaints",
-				"CheckNodeMemoryPressure",
-				"CheckNodeDiskPressure",
-				"MaxEBSVolumeCount",
-				"MaxGCEPDVolumeCount",
-				"MaxAzureDiskVolumeCount",
-				"MatchInterPodAffinity",
-				"GeneralPredicates",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"ImageLocalityPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
-				"NodePreferAvoidPodsPriority",
-				"NodeAffinityPriority",
-				"TaintTolerationPriority",
 				"InterPodAffinityPriority",
-				"MostRequestedPriority",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+					{Name: "EBSLimits"},
+					{Name: "GCEPDLimits"},
+					{Name: "AzureDiskLimits"},
+					{Name: "VolumeZone"},
+					{Name: "InterPodAffinity"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "ImageLocality", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+					{Name: "NodeResourcesMostAllocated", Weight: 2},
+					{Name: "NodeAffinity", Weight: 2},
+					{Name: "NodePreferAvoidPods", Weight: 2},
+					{Name: "TaintToleration", Weight: 2},
+				},
+			},
 		},
 		// Do not change this JSON after the corresponding release has been tagged.
 		// A failure indicates backwards compatibility with the specified release was broken.
@@ -318,13 +373,10 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 			{"name": "NoDiskConflict"},
 			{"name": "NoVolumeZoneConflict"},
 			{"name": "PodToleratesNodeTaints"},
-			{"name": "CheckNodeMemoryPressure"},
-			{"name": "CheckNodeDiskPressure"},
 			{"name": "MaxEBSVolumeCount"},
 			{"name": "MaxGCEPDVolumeCount"},
 			{"name": "MaxAzureDiskVolumeCount"},
 			{"name": "MatchInterPodAffinity"},
-			{"name": "GeneralPredicates"},
 			{"name": "TestServiceAffinity", "argument": {"serviceAffinity" : {"labels" : ["region"]}}},
 			{"name": "TestLabelsPresence",  "argument": {"labelsPresence"  : {"labels" : ["foo"], "presence":true}}}
 		  ],"priorities": [
@@ -351,35 +403,39 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  }]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
-				"PodFitsHostPorts",
-				"HostName",
-				"NoDiskConflict",
-				"NoVolumeZoneConflict",
-				"PodToleratesNodeTaints",
-				"CheckNodeMemoryPressure",
-				"CheckNodeDiskPressure",
-				"MaxEBSVolumeCount",
-				"MaxGCEPDVolumeCount",
-				"MaxAzureDiskVolumeCount",
-				"MatchInterPodAffinity",
-				"GeneralPredicates",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"ImageLocalityPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
-				"NodePreferAvoidPodsPriority",
-				"NodeAffinityPriority",
-				"TaintTolerationPriority",
 				"InterPodAffinityPriority",
-				"MostRequestedPriority",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+					{Name: "EBSLimits"},
+					{Name: "GCEPDLimits"},
+					{Name: "AzureDiskLimits"},
+					{Name: "VolumeZone"},
+					{Name: "InterPodAffinity"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "ImageLocality", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+					{Name: "NodeResourcesMostAllocated", Weight: 2},
+					{Name: "NodeAffinity", Weight: 2},
+					{Name: "NodePreferAvoidPods", Weight: 2},
+					{Name: "TaintToleration", Weight: 2},
+				},
+			},
 			wantExtenders: []schedulerapi.ExtenderConfig{{
 				URLPrefix:        "/prefix",
 				FilterVerb:       "filter",
@@ -406,14 +462,10 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 			{"name": "NoDiskConflict"},
 			{"name": "NoVolumeZoneConflict"},
 			{"name": "PodToleratesNodeTaints"},
-			{"name": "CheckNodeMemoryPressure"},
-			{"name": "CheckNodeDiskPressure"},
-			{"name": "CheckNodeCondition"},
 			{"name": "MaxEBSVolumeCount"},
 			{"name": "MaxGCEPDVolumeCount"},
 			{"name": "MaxAzureDiskVolumeCount"},
 			{"name": "MatchInterPodAffinity"},
-			{"name": "GeneralPredicates"},
 			{"name": "TestServiceAffinity", "argument": {"serviceAffinity" : {"labels" : ["region"]}}},
 			{"name": "TestLabelsPresence",  "argument": {"labelsPresence"  : {"labels" : ["foo"], "presence":true}}}
 		  ],"priorities": [
@@ -440,36 +492,39 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  }]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
-				"PodFitsHostPorts",
-				"HostName",
-				"NoDiskConflict",
-				"NoVolumeZoneConflict",
-				"PodToleratesNodeTaints",
-				"CheckNodeMemoryPressure",
-				"CheckNodeDiskPressure",
-				"CheckNodeCondition",
-				"MaxEBSVolumeCount",
-				"MaxGCEPDVolumeCount",
-				"MaxAzureDiskVolumeCount",
-				"MatchInterPodAffinity",
-				"GeneralPredicates",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"ImageLocalityPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
-				"NodePreferAvoidPodsPriority",
-				"NodeAffinityPriority",
-				"TaintTolerationPriority",
 				"InterPodAffinityPriority",
-				"MostRequestedPriority",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+					{Name: "EBSLimits"},
+					{Name: "GCEPDLimits"},
+					{Name: "AzureDiskLimits"},
+					{Name: "VolumeZone"},
+					{Name: "InterPodAffinity"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "ImageLocality", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+					{Name: "NodeResourcesMostAllocated", Weight: 2},
+					{Name: "NodeAffinity", Weight: 2},
+					{Name: "NodePreferAvoidPods", Weight: 2},
+					{Name: "TaintToleration", Weight: 2},
+				},
+			},
 			wantExtenders: []schedulerapi.ExtenderConfig{{
 				URLPrefix:        "/prefix",
 				FilterVerb:       "filter",
@@ -496,14 +551,10 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 			{"name": "NoDiskConflict"},
 			{"name": "NoVolumeZoneConflict"},
 			{"name": "PodToleratesNodeTaints"},
-			{"name": "CheckNodeMemoryPressure"},
-			{"name": "CheckNodeDiskPressure"},
-			{"name": "CheckNodeCondition"},
 			{"name": "MaxEBSVolumeCount"},
 			{"name": "MaxGCEPDVolumeCount"},
 			{"name": "MaxAzureDiskVolumeCount"},
 			{"name": "MatchInterPodAffinity"},
-			{"name": "GeneralPredicates"},
 			{"name": "CheckVolumeBinding"},
 			{"name": "TestServiceAffinity", "argument": {"serviceAffinity" : {"labels" : ["region"]}}},
 			{"name": "TestLabelsPresence",  "argument": {"labelsPresence"  : {"labels" : ["foo"], "presence":true}}}
@@ -531,37 +582,40 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  }]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
-				"PodFitsHostPorts",
-				"HostName",
-				"NoDiskConflict",
-				"NoVolumeZoneConflict",
-				"PodToleratesNodeTaints",
-				"CheckNodeMemoryPressure",
-				"CheckNodeDiskPressure",
-				"CheckNodeCondition",
-				"MaxEBSVolumeCount",
-				"MaxGCEPDVolumeCount",
-				"MaxAzureDiskVolumeCount",
-				"MatchInterPodAffinity",
-				"GeneralPredicates",
-				"CheckVolumeBinding",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"ImageLocalityPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
-				"NodePreferAvoidPodsPriority",
-				"NodeAffinityPriority",
-				"TaintTolerationPriority",
 				"InterPodAffinityPriority",
-				"MostRequestedPriority",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+					{Name: "EBSLimits"},
+					{Name: "GCEPDLimits"},
+					{Name: "AzureDiskLimits"},
+					{Name: "VolumeBinding"},
+					{Name: "VolumeZone"},
+					{Name: "InterPodAffinity"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "ImageLocality", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+					{Name: "NodeResourcesMostAllocated", Weight: 2},
+					{Name: "NodeAffinity", Weight: 2},
+					{Name: "NodePreferAvoidPods", Weight: 2},
+					{Name: "TaintToleration", Weight: 2},
+				},
+			},
 			wantExtenders: []schedulerapi.ExtenderConfig{{
 				URLPrefix:        "/prefix",
 				FilterVerb:       "filter",
@@ -589,15 +643,10 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 			{"name": "NoDiskConflict"},
 			{"name": "NoVolumeZoneConflict"},
 			{"name": "PodToleratesNodeTaints"},
-			{"name": "CheckNodeMemoryPressure"},
-			{"name": "CheckNodeDiskPressure"},
-			{"name": "CheckNodePIDPressure"},
-			{"name": "CheckNodeCondition"},
 			{"name": "MaxEBSVolumeCount"},
 			{"name": "MaxGCEPDVolumeCount"},
 			{"name": "MaxAzureDiskVolumeCount"},
 			{"name": "MatchInterPodAffinity"},
-			{"name": "GeneralPredicates"},
 			{"name": "CheckVolumeBinding"},
 			{"name": "TestServiceAffinity", "argument": {"serviceAffinity" : {"labels" : ["region"]}}},
 			{"name": "TestLabelsPresence",  "argument": {"labelsPresence"  : {"labels" : ["foo"], "presence":true}}}
@@ -627,38 +676,40 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  }]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
-				"PodFitsHostPorts",
-				"HostName",
-				"NoDiskConflict",
-				"NoVolumeZoneConflict",
-				"PodToleratesNodeTaints",
-				"CheckNodeMemoryPressure",
-				"CheckNodeDiskPressure",
-				"CheckNodePIDPressure",
-				"CheckNodeCondition",
-				"MaxEBSVolumeCount",
-				"MaxGCEPDVolumeCount",
-				"MaxAzureDiskVolumeCount",
-				"MatchInterPodAffinity",
-				"GeneralPredicates",
-				"CheckVolumeBinding",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"ImageLocalityPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
-				"NodePreferAvoidPodsPriority",
-				"NodeAffinityPriority",
-				"TaintTolerationPriority",
 				"InterPodAffinityPriority",
-				"MostRequestedPriority",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+					{Name: "EBSLimits"},
+					{Name: "GCEPDLimits"},
+					{Name: "AzureDiskLimits"},
+					{Name: "VolumeBinding"},
+					{Name: "VolumeZone"},
+					{Name: "InterPodAffinity"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "ImageLocality", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+					{Name: "NodeResourcesMostAllocated", Weight: 2},
+					{Name: "NodeAffinity", Weight: 2},
+					{Name: "NodePreferAvoidPods", Weight: 2},
+					{Name: "TaintToleration", Weight: 2},
+				},
+			},
 			wantExtenders: []schedulerapi.ExtenderConfig{{
 				URLPrefix:        "/prefix",
 				FilterVerb:       "filter",
@@ -687,15 +738,10 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 			{"name": "NoDiskConflict"},
 			{"name": "NoVolumeZoneConflict"},
 			{"name": "PodToleratesNodeTaints"},
-			{"name": "CheckNodeMemoryPressure"},
-			{"name": "CheckNodeDiskPressure"},
-			{"name": "CheckNodePIDPressure"},
-			{"name": "CheckNodeCondition"},
 			{"name": "MaxEBSVolumeCount"},
 			{"name": "MaxGCEPDVolumeCount"},
 			{"name": "MaxAzureDiskVolumeCount"},
 			{"name": "MatchInterPodAffinity"},
-			{"name": "GeneralPredicates"},
 			{"name": "CheckVolumeBinding"},
 			{"name": "TestServiceAffinity", "argument": {"serviceAffinity" : {"labels" : ["region"]}}},
 			{"name": "TestLabelsPresence",  "argument": {"labelsPresence"  : {"labels" : ["foo"], "presence":true}}}
@@ -736,39 +782,41 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  }]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
-				"PodFitsHostPorts",
-				"HostName",
-				"NoDiskConflict",
-				"NoVolumeZoneConflict",
-				"PodToleratesNodeTaints",
-				"CheckNodeMemoryPressure",
-				"CheckNodeDiskPressure",
-				"CheckNodePIDPressure",
-				"CheckNodeCondition",
-				"MaxEBSVolumeCount",
-				"MaxGCEPDVolumeCount",
-				"MaxAzureDiskVolumeCount",
-				"MatchInterPodAffinity",
-				"GeneralPredicates",
-				"CheckVolumeBinding",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"ImageLocalityPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
-				"NodePreferAvoidPodsPriority",
-				"NodeAffinityPriority",
-				"TaintTolerationPriority",
 				"InterPodAffinityPriority",
-				"MostRequestedPriority",
 				"RequestedToCapacityRatioPriority",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+					{Name: "EBSLimits"},
+					{Name: "GCEPDLimits"},
+					{Name: "AzureDiskLimits"},
+					{Name: "VolumeBinding"},
+					{Name: "VolumeZone"},
+					{Name: "InterPodAffinity"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "ImageLocality", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+					{Name: "NodeResourcesMostAllocated", Weight: 2},
+					{Name: "NodeAffinity", Weight: 2},
+					{Name: "NodePreferAvoidPods", Weight: 2},
+					{Name: "TaintToleration", Weight: 2},
+				},
+			},
 			wantExtenders: []schedulerapi.ExtenderConfig{{
 				URLPrefix:        "/prefix",
 				FilterVerb:       "filter",
@@ -797,16 +845,11 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 			{"name": "NoDiskConflict"},
 			{"name": "NoVolumeZoneConflict"},
 			{"name": "PodToleratesNodeTaints"},
-			{"name": "CheckNodeMemoryPressure"},
-			{"name": "CheckNodeDiskPressure"},
-			{"name": "CheckNodePIDPressure"},
-			{"name": "CheckNodeCondition"},
 			{"name": "MaxEBSVolumeCount"},
 			{"name": "MaxGCEPDVolumeCount"},
 			{"name": "MaxAzureDiskVolumeCount"},
 			{"name": "MaxCSIVolumeCountPred"},
 			{"name": "MatchInterPodAffinity"},
-			{"name": "GeneralPredicates"},
 			{"name": "CheckVolumeBinding"},
 			{"name": "TestServiceAffinity", "argument": {"serviceAffinity" : {"labels" : ["region"]}}},
 			{"name": "TestLabelsPresence",  "argument": {"labelsPresence"  : {"labels" : ["foo"], "presence":true}}}
@@ -847,40 +890,42 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  }]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
-				"PodFitsHostPorts",
-				"HostName",
-				"NoDiskConflict",
-				"NoVolumeZoneConflict",
-				"PodToleratesNodeTaints",
-				"CheckNodeMemoryPressure",
-				"CheckNodeDiskPressure",
-				"CheckNodePIDPressure",
-				"CheckNodeCondition",
-				"MaxEBSVolumeCount",
-				"MaxGCEPDVolumeCount",
-				"MaxAzureDiskVolumeCount",
-				"MaxCSIVolumeCountPred",
-				"MatchInterPodAffinity",
-				"GeneralPredicates",
-				"CheckVolumeBinding",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"ImageLocalityPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
-				"NodePreferAvoidPodsPriority",
-				"NodeAffinityPriority",
-				"TaintTolerationPriority",
 				"InterPodAffinityPriority",
-				"MostRequestedPriority",
 				"RequestedToCapacityRatioPriority",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+					{Name: "EBSLimits"},
+					{Name: "GCEPDLimits"},
+					{Name: "NodeVolumeLimits"},
+					{Name: "AzureDiskLimits"},
+					{Name: "VolumeBinding"},
+					{Name: "VolumeZone"},
+					{Name: "InterPodAffinity"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "ImageLocality", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+					{Name: "NodeResourcesMostAllocated", Weight: 2},
+					{Name: "NodeAffinity", Weight: 2},
+					{Name: "NodePreferAvoidPods", Weight: 2},
+					{Name: "TaintToleration", Weight: 2},
+				},
+			},
 			wantExtenders: []schedulerapi.ExtenderConfig{{
 				URLPrefix:        "/prefix",
 				FilterVerb:       "filter",
@@ -907,17 +952,12 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 			{"name": "NoDiskConflict"},
 			{"name": "NoVolumeZoneConflict"},
 			{"name": "PodToleratesNodeTaints"},
-			{"name": "CheckNodeMemoryPressure"},
-			{"name": "CheckNodeDiskPressure"},
-			{"name": "CheckNodePIDPressure"},
-			{"name": "CheckNodeCondition"},
 			{"name": "MaxEBSVolumeCount"},
 			{"name": "MaxGCEPDVolumeCount"},
 			{"name": "MaxAzureDiskVolumeCount"},
 			{"name": "MaxCSIVolumeCountPred"},
                         {"name": "MaxCinderVolumeCount"},
 			{"name": "MatchInterPodAffinity"},
-			{"name": "GeneralPredicates"},
 			{"name": "CheckVolumeBinding"},
 			{"name": "TestServiceAffinity", "argument": {"serviceAffinity" : {"labels" : ["region"]}}},
 			{"name": "TestLabelsPresence",  "argument": {"labelsPresence"  : {"labels" : ["foo"], "presence":true}}}
@@ -958,41 +998,43 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  }]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
-				"PodFitsHostPorts",
-				"HostName",
-				"NoDiskConflict",
-				"NoVolumeZoneConflict",
-				"PodToleratesNodeTaints",
-				"CheckNodeMemoryPressure",
-				"CheckNodeDiskPressure",
-				"CheckNodePIDPressure",
-				"CheckNodeCondition",
-				"MaxEBSVolumeCount",
-				"MaxGCEPDVolumeCount",
-				"MaxAzureDiskVolumeCount",
-				"MaxCSIVolumeCountPred",
-				"MaxCinderVolumeCount",
-				"MatchInterPodAffinity",
-				"GeneralPredicates",
-				"CheckVolumeBinding",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"ImageLocalityPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
-				"NodePreferAvoidPodsPriority",
-				"NodeAffinityPriority",
-				"TaintTolerationPriority",
 				"InterPodAffinityPriority",
-				"MostRequestedPriority",
 				"RequestedToCapacityRatioPriority",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+					{Name: "EBSLimits"},
+					{Name: "GCEPDLimits"},
+					{Name: "NodeVolumeLimits"},
+					{Name: "AzureDiskLimits"},
+					{Name: "CinderLimits"},
+					{Name: "VolumeBinding"},
+					{Name: "VolumeZone"},
+					{Name: "InterPodAffinity"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "ImageLocality", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+					{Name: "NodeResourcesMostAllocated", Weight: 2},
+					{Name: "NodeAffinity", Weight: 2},
+					{Name: "NodePreferAvoidPods", Weight: 2},
+					{Name: "TaintToleration", Weight: 2},
+				},
+			},
 			wantExtenders: []schedulerapi.ExtenderConfig{{
 				URLPrefix:        "/prefix",
 				FilterVerb:       "filter",
@@ -1019,17 +1061,12 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 			{"name": "NoDiskConflict"},
 			{"name": "NoVolumeZoneConflict"},
 			{"name": "PodToleratesNodeTaints"},
-			{"name": "CheckNodeMemoryPressure"},
-			{"name": "CheckNodeDiskPressure"},
-			{"name": "CheckNodePIDPressure"},
-			{"name": "CheckNodeCondition"},
 			{"name": "MaxEBSVolumeCount"},
 			{"name": "MaxGCEPDVolumeCount"},
 			{"name": "MaxAzureDiskVolumeCount"},
 			{"name": "MaxCSIVolumeCountPred"},
                         {"name": "MaxCinderVolumeCount"},
 			{"name": "MatchInterPodAffinity"},
-			{"name": "GeneralPredicates"},
 			{"name": "CheckVolumeBinding"},
 			{"name": "TestServiceAffinity", "argument": {"serviceAffinity" : {"labels" : ["region"]}}},
 			{"name": "TestLabelsPresence",  "argument": {"labelsPresence"  : {"labels" : ["foo"], "presence":true}}}
@@ -1074,41 +1111,43 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 		  }]
 		}`,
 			wantPredicates: sets.NewString(
-				"MatchNodeSelector",
-				"PodFitsResources",
-				"PodFitsHostPorts",
-				"HostName",
-				"NoDiskConflict",
-				"NoVolumeZoneConflict",
-				"PodToleratesNodeTaints",
-				"CheckNodeMemoryPressure",
-				"CheckNodeDiskPressure",
-				"CheckNodePIDPressure",
-				"CheckNodeCondition",
-				"MaxEBSVolumeCount",
-				"MaxGCEPDVolumeCount",
-				"MaxAzureDiskVolumeCount",
-				"MaxCSIVolumeCountPred",
-				"MaxCinderVolumeCount",
-				"MatchInterPodAffinity",
-				"GeneralPredicates",
-				"CheckVolumeBinding",
 				"TestServiceAffinity",
 				"TestLabelsPresence",
 			),
 			wantPrioritizers: sets.NewString(
 				"EqualPriority",
-				"ImageLocalityPriority",
-				"LeastRequestedPriority",
-				"BalancedResourceAllocation",
 				"SelectorSpreadPriority",
-				"NodePreferAvoidPodsPriority",
-				"NodeAffinityPriority",
-				"TaintTolerationPriority",
 				"InterPodAffinityPriority",
-				"MostRequestedPriority",
 				"RequestedToCapacityRatioPriority",
 			),
+			wantPlugins: map[string][]kubeschedulerconfig.Plugin{
+				"FilterPlugin": {
+					{Name: "NodeUnschedulable"},
+					{Name: "NodeName"},
+					{Name: "NodePorts"},
+					{Name: "NodeAffinity"},
+					{Name: "NodeResourcesFit"},
+					{Name: "VolumeRestrictions"},
+					{Name: "TaintToleration"},
+					{Name: "EBSLimits"},
+					{Name: "GCEPDLimits"},
+					{Name: "NodeVolumeLimits"},
+					{Name: "AzureDiskLimits"},
+					{Name: "CinderLimits"},
+					{Name: "VolumeBinding"},
+					{Name: "VolumeZone"},
+					{Name: "InterPodAffinity"},
+				},
+				"ScorePlugin": {
+					{Name: "NodeResourcesBalancedAllocation", Weight: 2},
+					{Name: "ImageLocality", Weight: 2},
+					{Name: "NodeResourcesLeastAllocated", Weight: 2},
+					{Name: "NodeResourcesMostAllocated", Weight: 2},
+					{Name: "NodeAffinity", Weight: 2},
+					{Name: "NodePreferAvoidPods", Weight: 2},
+					{Name: "TaintToleration", Weight: 2},
+				},
+			},
 			wantExtenders: []schedulerapi.ExtenderConfig{{
 				URLPrefix:        "/prefix",
 				FilterVerb:       "filter",
@@ -1124,11 +1163,38 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 			}},
 		},
 	}
-	registeredPredicates := sets.NewString(factory.ListRegisteredFitPredicates()...)
-	registeredPriorities := sets.NewString(factory.ListRegisteredPriorityFunctions()...)
+	registeredPredicates := sets.NewString(scheduler.ListRegisteredFitPredicates()...)
+	registeredPriorities := sets.NewString(scheduler.ListRegisteredPriorityFunctions()...)
 	seenPredicates := sets.NewString()
 	seenPriorities := sets.NewString()
-	mandatoryPredicates := sets.NewString("CheckNodeCondition")
+	mandatoryPredicates := sets.NewString()
+	generalPredicateFilters := []string{"NodeResourcesFit", "NodeName", "NodePorts", "NodeAffinity"}
+	filterToPredicateMap := map[string]string{
+		"NodeUnschedulable":  "CheckNodeUnschedulable",
+		"TaintToleration":    "PodToleratesNodeTaints",
+		"NodeName":           "HostName",
+		"NodePorts":          "PodFitsHostPorts",
+		"NodeResourcesFit":   "PodFitsResources",
+		"NodeAffinity":       "MatchNodeSelector",
+		"VolumeBinding":      "CheckVolumeBinding",
+		"VolumeRestrictions": "NoDiskConflict",
+		"VolumeZone":         "NoVolumeZoneConflict",
+		"NodeVolumeLimits":   "MaxCSIVolumeCountPred",
+		"EBSLimits":          "MaxEBSVolumeCount",
+		"GCEPDLimits":        "MaxGCEPDVolumeCount",
+		"AzureDiskLimits":    "MaxAzureDiskVolumeCount",
+		"CinderLimits":       "MaxCinderVolumeCount",
+		"InterPodAffinity":   "MatchInterPodAffinity",
+	}
+	scoreToPriorityMap := map[string]string{
+		"ImageLocality":                   "ImageLocalityPriority",
+		"NodeAffinity":                    "NodeAffinityPriority",
+		"NodePreferAvoidPods":             "NodePreferAvoidPodsPriority",
+		"TaintToleration":                 "TaintTolerationPriority",
+		"NodeResourcesLeastAllocated":     "LeastRequestedPriority",
+		"NodeResourcesBalancedAllocation": "BalancedResourceAllocation",
+		"NodeResourcesMostAllocated":      "MostRequestedPriority",
+	}
 
 	for v, tc := range schedulerFiles {
 		t.Run(v, func(t *testing.T) {
@@ -1149,44 +1215,50 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 
 			sched, err := scheduler.New(
 				client,
-				informerFactory.Core().V1().Nodes(),
+				informerFactory,
 				informerFactory.Core().V1().Pods(),
-				informerFactory.Core().V1().PersistentVolumes(),
-				informerFactory.Core().V1().PersistentVolumeClaims(),
-				informerFactory.Core().V1().ReplicationControllers(),
-				informerFactory.Apps().V1().ReplicaSets(),
-				informerFactory.Apps().V1().StatefulSets(),
-				informerFactory.Core().V1().Services(),
-				informerFactory.Policy().V1beta1().PodDisruptionBudgets(),
-				informerFactory.Storage().V1().StorageClasses(),
-				informerFactory.Storage().V1beta1().CSINodes(),
 				nil,
 				algorithmSrc,
 				make(chan struct{}),
-				schedulerframework.NewDefaultRegistry(),
-				nil,
-				[]kubeschedulerconfig.PluginConfig{},
 			)
+
 			if err != nil {
 				t.Fatalf("%s: Error constructing: %v", v, err)
 			}
-			schedPredicates := sets.NewString()
+			gotPredicates := sets.NewString()
 			for p := range sched.Algorithm.Predicates() {
-				schedPredicates.Insert(p)
+				gotPredicates.Insert(p)
 			}
 			wantPredicates := tc.wantPredicates.Union(mandatoryPredicates)
-			if !schedPredicates.Equal(wantPredicates) {
-				t.Errorf("Got predicates %v, want %v", schedPredicates, wantPredicates)
-			}
-			schedPrioritizers := sets.NewString()
-			for _, p := range sched.Algorithm.Prioritizers() {
-				schedPrioritizers.Insert(p.Name)
+			if !gotPredicates.Equal(wantPredicates) {
+				t.Errorf("Got predicates %v, want %v", gotPredicates, wantPredicates)
 			}
 
-			if !schedPrioritizers.Equal(tc.wantPrioritizers) {
-				t.Errorf("Got prioritizers %v, want %v", schedPrioritizers, tc.wantPrioritizers)
+			gotPrioritizers := sets.NewString()
+			for _, p := range sched.Algorithm.Prioritizers() {
+				gotPrioritizers.Insert(p.Name)
 			}
-			schedExtenders := sched.Algorithm.Extenders()
+			if !gotPrioritizers.Equal(tc.wantPrioritizers) {
+				t.Errorf("Got prioritizers %v, want %v", gotPrioritizers, tc.wantPrioritizers)
+			}
+
+			gotPlugins := sched.Framework.ListPlugins()
+			for _, p := range gotPlugins["FilterPlugin"] {
+				seenPredicates.Insert(filterToPredicateMap[p.Name])
+
+			}
+			if pluginsToStringSet(gotPlugins["FilterPlugin"]).HasAll(generalPredicateFilters...) {
+				seenPredicates.Insert("GeneralPredicates")
+			}
+			for _, p := range gotPlugins["ScorePlugin"] {
+				seenPriorities.Insert(scoreToPriorityMap[p.Name])
+
+			}
+			if diff := cmp.Diff(tc.wantPlugins, gotPlugins); diff != "" {
+				t.Errorf("unexpected plugins diff (-want, +got): %s", diff)
+			}
+
+			gotExtenders := sched.Algorithm.Extenders()
 			var wantExtenders []*core.HTTPExtender
 			for _, e := range tc.wantExtenders {
 				extender, err := core.NewHTTPExtender(&e)
@@ -1195,13 +1267,14 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 				}
 				wantExtenders = append(wantExtenders, extender.(*core.HTTPExtender))
 			}
-			for i := range schedExtenders {
-				if !core.Equal(wantExtenders[i], schedExtenders[i].(*core.HTTPExtender)) {
-					t.Errorf("Got extender #%d %+v, want %+v", i, schedExtenders[i], wantExtenders[i])
+			for i := range gotExtenders {
+				if !core.Equal(wantExtenders[i], gotExtenders[i].(*core.HTTPExtender)) {
+					t.Errorf("Got extender #%d %+v, want %+v", i, gotExtenders[i], wantExtenders[i])
 				}
 			}
-			seenPredicates = seenPredicates.Union(schedPredicates)
-			seenPriorities = seenPriorities.Union(schedPrioritizers)
+
+			seenPredicates = seenPredicates.Union(gotPredicates)
+			seenPriorities = seenPriorities.Union(gotPrioritizers)
 		})
 	}
 
@@ -1211,4 +1284,12 @@ func TestCompatibility_v1_Scheduler(t *testing.T) {
 	if !seenPriorities.HasAll(registeredPriorities.List()...) {
 		t.Errorf("Registered priorities are missing from compatibility test (add to test stanza for version currently in development): %#v", registeredPriorities.Difference(seenPriorities).List())
 	}
+}
+
+func pluginsToStringSet(plugins []kubeschedulerconfig.Plugin) sets.String {
+	s := sets.NewString()
+	for _, p := range plugins {
+		s.Insert(p.Name)
+	}
+	return s
 }

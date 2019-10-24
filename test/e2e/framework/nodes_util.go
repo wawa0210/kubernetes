@@ -25,14 +25,14 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2essh "k8s.io/kubernetes/test/e2e/framework/ssh"
 )
 
-const etcdImage = "3.3.15-0"
+const etcdImage = "3.3.17-0"
 
 // EtcdUpgrade upgrades etcd on GCE.
 func EtcdUpgrade(targetStorage, targetVersion string) error {
@@ -230,28 +230,55 @@ func nodeUpgradeGCE(rawV, img string, enableKubeProxyDaemonSet bool) error {
 
 func nodeUpgradeGKE(v string, img string) error {
 	Logf("Upgrading nodes to version %q and image %q", v, img)
-	args := []string{
-		"container",
-		"clusters",
-		fmt.Sprintf("--project=%s", TestContext.CloudConfig.ProjectID),
-		locationParamGKE(),
-		"upgrade",
-		TestContext.CloudConfig.Cluster,
-		fmt.Sprintf("--cluster-version=%s", v),
-		"--quiet",
-	}
-	if len(img) > 0 {
-		args = append(args, fmt.Sprintf("--image-type=%s", img))
-	}
-	_, _, err := RunCmd("gcloud", appendContainerCommandGroupIfNeeded(args)...)
-
+	nps, err := nodePoolsGKE()
 	if err != nil {
 		return err
 	}
+	Logf("Found node pools %v", nps)
+	for _, np := range nps {
+		args := []string{
+			"container",
+			"clusters",
+			fmt.Sprintf("--project=%s", TestContext.CloudConfig.ProjectID),
+			locationParamGKE(),
+			"upgrade",
+			TestContext.CloudConfig.Cluster,
+			fmt.Sprintf("--node-pool=%s", np),
+			fmt.Sprintf("--cluster-version=%s", v),
+			"--quiet",
+		}
+		if len(img) > 0 {
+			args = append(args, fmt.Sprintf("--image-type=%s", img))
+		}
+		_, _, err = RunCmd("gcloud", appendContainerCommandGroupIfNeeded(args)...)
 
-	waitForSSHTunnels()
+		if err != nil {
+			return err
+		}
 
+		waitForSSHTunnels()
+	}
 	return nil
+}
+
+func nodePoolsGKE() ([]string, error) {
+	args := []string{
+		"container",
+		"node-pools",
+		fmt.Sprintf("--project=%s", TestContext.CloudConfig.ProjectID),
+		locationParamGKE(),
+		"list",
+		fmt.Sprintf("--cluster=%s", TestContext.CloudConfig.Cluster),
+		`--format="get(name)"`,
+	}
+	stdout, _, err := RunCmd("gcloud", appendContainerCommandGroupIfNeeded(args)...)
+	if err != nil {
+		return nil, err
+	}
+	if len(strings.TrimSpace(stdout)) == 0 {
+		return []string{}, nil
+	}
+	return strings.Fields(stdout), nil
 }
 
 // MigTemplate (GCE-only) returns the name of the MIG template that the
@@ -338,13 +365,13 @@ func (k *NodeKiller) Run(stopCh <-chan struct{}) {
 }
 
 func (k *NodeKiller) pickNodes() []v1.Node {
-	nodes := GetReadySchedulableNodesOrDie(k.client)
+	nodes, err := e2enode.GetReadySchedulableNodes(k.client)
+	ExpectNoError(err)
 	numNodes := int(k.config.FailureRatio * float64(len(nodes.Items)))
-	shuffledNodes := shuffleNodes(nodes.Items)
-	if len(shuffledNodes) > numNodes {
-		return shuffledNodes[:numNodes]
-	}
-	return shuffledNodes
+
+	nodes, err = e2enode.GetBoundedReadySchedulableNodes(k.client, numNodes)
+	ExpectNoError(err)
+	return nodes.Items
 }
 
 func (k *NodeKiller) kill(nodes []v1.Node) {

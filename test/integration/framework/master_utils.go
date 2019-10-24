@@ -17,6 +17,7 @@ limitations under the License.
 package framework
 
 import (
+	"context"
 	"flag"
 	"net"
 	"net/http"
@@ -69,7 +70,7 @@ type Config struct {
 // alwaysAllow always allows an action
 type alwaysAllow struct{}
 
-func (alwaysAllow) Authorize(requestAttributes authorizer.Attributes) (authorizer.Decision, string, error) {
+func (alwaysAllow) Authorize(ctx context.Context, requestAttributes authorizer.Attributes) (authorizer.Decision, string, error) {
 	return authorizer.DecisionAllow, "always allow", nil
 }
 
@@ -189,6 +190,8 @@ func startMasterOrDie(masterConfig *master.Config, incomingServer *httptest.Serv
 	masterConfig.ExtraConfig.VersionedInformers = informers.NewSharedInformerFactory(clientset, masterConfig.GenericConfig.LoopbackClientConfig.Timeout)
 	m, err = masterConfig.Complete().New(genericapiserver.NewEmptyDelegate())
 	if err != nil {
+		// We log the error first so that even if closeFn crashes, the error is shown
+		klog.Errorf("error in bringing up the master: %v", err)
 		closeFn()
 		klog.Fatalf("error in bringing up the master: %v", err)
 	}

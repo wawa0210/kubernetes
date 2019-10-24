@@ -47,7 +47,6 @@ import (
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/initsystem"
 	utilruntime "k8s.io/kubernetes/cmd/kubeadm/app/util/runtime"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/system"
-	"k8s.io/kubernetes/pkg/registry/core/service/ipallocator"
 	utilsexec "k8s.io/utils/exec"
 	utilsnet "k8s.io/utils/net"
 )
@@ -479,7 +478,7 @@ func (subnet HTTPProxyCIDRCheck) Check() (warnings, errorList []error) {
 		return nil, []error{errors.Wrapf(err, "error parsing CIDR %q", subnet.CIDR)}
 	}
 
-	testIP, err := ipallocator.GetIndexedIP(cidr, 1)
+	testIP, err := utilsnet.GetIndexedIP(cidr, 1)
 	if err != nil {
 		return nil, []error{errors.Wrapf(err, "unable to get first IP address from the given CIDR (%s)", cidr.String())}
 	}
@@ -546,10 +545,10 @@ func (sysver SystemVerificationCheck) Check() (warnings, errorList []error) {
 	for _, v := range validators {
 		warn, err := v.Validate(system.DefaultSysSpec)
 		if err != nil {
-			errs = append(errs, err)
+			errs = append(errs, err...)
 		}
 		if warn != nil {
-			warns = append(warns, warn)
+			warns = append(warns, warn...)
 		}
 	}
 
@@ -894,10 +893,12 @@ func RunInitNodeChecks(execer utilsexec.Interface, cfg *kubeadmapi.InitConfigura
 		FileAvailableCheck{Path: kubeadmconstants.GetStaticPodFilepath(kubeadmconstants.KubeScheduler, manifestsDir)},
 		FileAvailableCheck{Path: kubeadmconstants.GetStaticPodFilepath(kubeadmconstants.Etcd, manifestsDir)},
 		HTTPProxyCheck{Proto: "https", Host: cfg.LocalAPIEndpoint.AdvertiseAddress},
-		HTTPProxyCIDRCheck{Proto: "https", CIDR: cfg.Networking.ServiceSubnet},
 	}
-
-	cidrs := strings.Split(cfg.Networking.PodSubnet, ",")
+	cidrs := strings.Split(cfg.Networking.ServiceSubnet, ",")
+	for _, cidr := range cidrs {
+		checks = append(checks, HTTPProxyCIDRCheck{Proto: "https", CIDR: cidr})
+	}
+	cidrs = strings.Split(cfg.Networking.PodSubnet, ",")
 	for _, cidr := range cidrs {
 		checks = append(checks, HTTPProxyCIDRCheck{Proto: "https", CIDR: cidr})
 	}

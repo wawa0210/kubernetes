@@ -127,6 +127,7 @@ const (
 
 	// owner: @k82cn
 	// beta: v1.12
+	// GA: v1.17
 	//
 	// Taint nodes based on their condition status for 'NetworkUnavailable',
 	// 'MemoryPressure', 'PIDPressure' and 'DiskPressure'.
@@ -240,6 +241,7 @@ const (
 
 	// owner: @k82cn
 	// beta: v1.12
+	// GA: v1.17
 	//
 	// Schedule DaemonSet Pods by default scheduler instead of DaemonSet controller
 	ScheduleDaemonSetPods featuregate.Feature = "ScheduleDaemonSetPods"
@@ -299,7 +301,9 @@ const (
 	BalanceAttachedNodeVolumes featuregate.Feature = "BalanceAttachedNodeVolumes"
 
 	// owner: @kevtaylor
+	// alpha: v1.14
 	// beta: v1.15
+	// ga: v1.17
 	//
 	// Allow subpath environment variable substitution
 	// Only applicable if the VolumeSubpath feature is also enabled
@@ -482,6 +486,12 @@ const (
 	//
 	// Enables the startupProbe in kubelet worker.
 	StartupProbe featuregate.Feature = "StartupProbe"
+
+	// owner: @deads2k
+	// beta: v1.17
+	//
+	// Enables the users to skip TLS verification of kubelets on pod logs requests
+	AllowInsecureBackendProxy featuregate.Feature = "AllowInsecureBackendProxy"
 )
 
 func init() {
@@ -504,7 +514,7 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 	EphemeralContainers:            {Default: false, PreRelease: featuregate.Alpha},
 	PodShareProcessNamespace:       {Default: true, PreRelease: featuregate.Beta},
 	PodPriority:                    {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.18
-	TaintNodesByCondition:          {Default: true, PreRelease: featuregate.Beta},
+	TaintNodesByCondition:          {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.18
 	QOSReserved:                    {Default: false, PreRelease: featuregate.Alpha},
 	ExpandPersistentVolumes:        {Default: true, PreRelease: featuregate.Beta},
 	ExpandInUsePersistentVolumes:   {Default: true, PreRelease: featuregate.Beta},
@@ -525,7 +535,7 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 	SupportPodPidsLimit:            {Default: true, PreRelease: featuregate.Beta},
 	SupportNodePidsLimit:           {Default: true, PreRelease: featuregate.Beta},
 	HyperVContainer:                {Default: false, PreRelease: featuregate.Alpha},
-	ScheduleDaemonSetPods:          {Default: true, PreRelease: featuregate.Beta},
+	ScheduleDaemonSetPods:          {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.18
 	TokenRequest:                   {Default: true, PreRelease: featuregate.Beta},
 	TokenRequestProjection:         {Default: true, PreRelease: featuregate.Beta},
 	BoundServiceAccountTokenVolume: {Default: false, PreRelease: featuregate.Alpha},
@@ -539,7 +549,7 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 	CSIMigrationOpenStack:          {Default: false, PreRelease: featuregate.Alpha},
 	VolumeSubpath:                  {Default: true, PreRelease: featuregate.GA},
 	BalanceAttachedNodeVolumes:     {Default: false, PreRelease: featuregate.Alpha},
-	VolumeSubpathEnvExpansion:      {Default: true, PreRelease: featuregate.Beta},
+	VolumeSubpathEnvExpansion:      {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.19,
 	ResourceQuotaScopeSelectors:    {Default: true, PreRelease: featuregate.Beta},
 	CSIBlockVolume:                 {Default: true, PreRelease: featuregate.Beta},
 	CSIInlineVolume:                {Default: true, PreRelease: featuregate.Beta},
@@ -561,6 +571,7 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 	EndpointSlice:                                  {Default: false, PreRelease: featuregate.Alpha},
 	EvenPodsSpread:                                 {Default: false, PreRelease: featuregate.Alpha},
 	StartupProbe:                                   {Default: false, PreRelease: featuregate.Alpha},
+	AllowInsecureBackendProxy:                      {Default: true, PreRelease: featuregate.Beta},
 
 	// inherited features from generic apiserver, relisted here to get a conflict if it is changed
 	// unintentionally on either side:

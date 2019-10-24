@@ -71,6 +71,9 @@ func InitVolumesTestSuite() TestSuite {
 				testpatterns.BlockVolModePreprovisionedPV,
 				testpatterns.BlockVolModeDynamicPV,
 			},
+			supportedSizeRange: volume.SizeRange{
+				Min: "1Mi",
+			},
 		},
 	}
 }
@@ -89,7 +92,7 @@ func skipExecTest(driver TestDriver) {
 	}
 }
 
-func skipBlockTest(driver TestDriver) {
+func skipTestIfBlockNotSupported(driver TestDriver) {
 	dInfo := driver.GetDriverInfo()
 	if !dInfo.Capabilities[CapBlock] {
 		framework.Skipf("Driver %q does not provide raw block - skipping", dInfo.Name)
@@ -123,7 +126,8 @@ func (t *volumesTestSuite) defineTests(driver TestDriver, pattern testpatterns.T
 		// Now do the more expensive test initialization.
 		l.config, l.driverCleanup = driver.PrepareTest(f)
 		l.intreeOps, l.migratedOps = getMigrationVolumeOpCounts(f.ClientSet, dInfo.InTreePluginName)
-		l.resource = createGenericVolumeTestResource(driver, l.config, pattern)
+		testVolumeSizeRange := t.getTestSuiteInfo().supportedSizeRange
+		l.resource = createGenericVolumeTestResource(driver, l.config, pattern, testVolumeSizeRange)
 		if l.resource.volSource == nil {
 			framework.Skipf("Driver %q does not define volumeSource - skipping", dInfo.Name)
 		}
@@ -145,7 +149,7 @@ func (t *volumesTestSuite) defineTests(driver TestDriver, pattern testpatterns.T
 
 	ginkgo.It("should store data", func() {
 		if pattern.VolMode == v1.PersistentVolumeBlock {
-			skipBlockTest(driver)
+			skipTestIfBlockNotSupported(driver)
 		}
 
 		init()

@@ -23,14 +23,15 @@ package operationexecutor
 import (
 	"context"
 	"fmt"
-	"k8s.io/klog"
 	"net"
 	"time"
+
+	"k8s.io/klog"
 
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"k8s.io/client-go/tools/record"
-	registerapi "k8s.io/kubernetes/pkg/kubelet/apis/pluginregistration/v1"
+	registerapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
 	"k8s.io/kubernetes/pkg/kubelet/pluginmanager/cache"
 )
 

@@ -17,27 +17,16 @@ limitations under the License.
 package priorities
 
 import (
-	"fmt"
 	"reflect"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	schedulerapi "k8s.io/kubernetes/pkg/scheduler/api"
+	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	fakelisters "k8s.io/kubernetes/pkg/scheduler/listers/fake"
 	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 )
-
-type FakeNodeListInfo []*v1.Node
-
-func (nodes FakeNodeListInfo) GetNodeInfo(nodeName string) (*v1.Node, error) {
-	for _, node := range nodes {
-		if node.Name == nodeName {
-			return node, nil
-		}
-	}
-	return nil, fmt.Errorf("Unable to find node: %s", nodeName)
-}
 
 func TestInterPodAffinityPriority(t *testing.T) {
 	labelRgChina := map[string]string{
@@ -266,7 +255,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 		pod          *v1.Pod
 		pods         []*v1.Pod
 		nodes        []*v1.Node
-		expectedList schedulerapi.HostPriorityList
+		expectedList framework.NodeScoreList
 		name         string
 	}{
 		{
@@ -276,7 +265,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelRgIndia}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine3", Labels: labelAzAz1}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: 0}, {Host: "machine2", Score: 0}, {Host: "machine3", Score: 0}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 0}, {Name: "machine3", Score: 0}},
 			name:         "all machines are same priority as Affinity is nil",
 		},
 		// the node(machine1) that have the label {"region": "China"} (match the topology key) and that have existing pods that match the labelSelector get high score
@@ -294,7 +283,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelRgIndia}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine3", Labels: labelAzAz1}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: schedulerapi.MaxPriority}, {Host: "machine2", Score: 0}, {Host: "machine3", Score: 0}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: 0}, {Name: "machine3", Score: 0}},
 			name: "Affinity: pod that matches topology key & pods in nodes will get high score comparing to others" +
 				"which doesn't match either pods in nodes or in topology key",
 		},
@@ -312,7 +301,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelRgChinaAzAz1}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine3", Labels: labelRgIndia}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: schedulerapi.MaxPriority}, {Host: "machine2", Score: schedulerapi.MaxPriority}, {Host: "machine3", Score: 0}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: framework.MaxNodeScore}, {Name: "machine3", Score: 0}},
 			name:         "All the nodes that have the same topology key & label value with one of them has an existing pod that match the affinity rules, have the same score",
 		},
 		// there are 2 regions, say regionChina(machine1,machine3,machine4) and regionIndia(machine2,machine5), both regions have nodes that match the preference.
@@ -336,7 +325,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine4", Labels: labelRgChina}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine5", Labels: labelRgIndia}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: schedulerapi.MaxPriority}, {Host: "machine2", Score: 5}, {Host: "machine3", Score: schedulerapi.MaxPriority}, {Host: "machine4", Score: schedulerapi.MaxPriority}, {Host: "machine5", Score: 5}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: 50}, {Name: "machine3", Score: framework.MaxNodeScore}, {Name: "machine4", Score: framework.MaxNodeScore}, {Name: "machine5", Score: 50}},
 			name:         "Affinity: nodes in one region has more matching pods comparing to other reqion, so the region which has more macthes will get high score",
 		},
 		// Test with the different operators and values for pod affinity scheduling preference, including some match failures.
@@ -352,7 +341,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelRgIndia}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine3", Labels: labelAzAz1}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: 2}, {Host: "machine2", Score: schedulerapi.MaxPriority}, {Host: "machine3", Score: 0}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 20}, {Name: "machine2", Score: framework.MaxNodeScore}, {Name: "machine3", Score: 0}},
 			name:         "Affinity: different Label operators and values for pod affinity scheduling preference, including some match failures ",
 		},
 		// Test the symmetry cases for affinity, the difference between affinity and symmetry is not the pod wants to run together with some existing pods,
@@ -368,7 +357,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelRgIndia}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine3", Labels: labelAzAz1}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: 0}, {Host: "machine2", Score: schedulerapi.MaxPriority}, {Host: "machine3", Score: 0}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: framework.MaxNodeScore}, {Name: "machine3", Score: 0}},
 			name:         "Affinity symmetry: considred only the preferredDuringSchedulingIgnoredDuringExecution in pod affinity symmetry",
 		},
 		{
@@ -382,7 +371,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelRgIndia}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine3", Labels: labelAzAz1}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: schedulerapi.MaxPriority}, {Host: "machine2", Score: schedulerapi.MaxPriority}, {Host: "machine3", Score: 0}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: framework.MaxNodeScore}, {Name: "machine3", Score: 0}},
 			name:         "Affinity symmetry: considred RequiredDuringSchedulingIgnoredDuringExecution in pod affinity symmetry",
 		},
 
@@ -402,7 +391,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine1", Labels: labelAzAz1}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelRgChina}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: 0}, {Host: "machine2", Score: schedulerapi.MaxPriority}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: framework.MaxNodeScore}},
 			name:         "Anti Affinity: pod that doesnot match existing pods in node will get high score ",
 		},
 		{
@@ -415,7 +404,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine1", Labels: labelAzAz1}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelRgChina}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: 0}, {Host: "machine2", Score: schedulerapi.MaxPriority}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: framework.MaxNodeScore}},
 			name:         "Anti Affinity: pod that does not matches topology key & matches the pods in nodes will get higher score comparing to others ",
 		},
 		{
@@ -429,7 +418,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine1", Labels: labelAzAz1}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelRgIndia}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: 0}, {Host: "machine2", Score: schedulerapi.MaxPriority}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: framework.MaxNodeScore}},
 			name:         "Anti Affinity: one node has more matching pods comparing to other node, so the node which has more unmacthes will get high score",
 		},
 		// Test the symmetry cases for anti affinity
@@ -443,7 +432,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine1", Labels: labelAzAz1}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelAzAz2}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: 0}, {Host: "machine2", Score: schedulerapi.MaxPriority}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: framework.MaxNodeScore}},
 			name:         "Anti Affinity symmetry: the existing pods in node which has anti affinity match will get high score",
 		},
 		// Test both  affinity and anti-affinity
@@ -457,7 +446,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine1", Labels: labelRgChina}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelAzAz1}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: schedulerapi.MaxPriority}, {Host: "machine2", Score: 0}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: 0}},
 			name:         "Affinity and Anti Affinity: considered only preferredDuringSchedulingIgnoredDuringExecution in both pod affinity & anti affinity",
 		},
 		// Combined cases considering both affinity and anti-affinity, the pod to schedule and existing pods have the same labels (they are in the same RC/service),
@@ -482,7 +471,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine4", Labels: labelRgChina}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine5", Labels: labelRgIndia}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: schedulerapi.MaxPriority}, {Host: "machine2", Score: 4}, {Host: "machine3", Score: schedulerapi.MaxPriority}, {Host: "machine4", Score: schedulerapi.MaxPriority}, {Host: "machine5", Score: 4}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: 40}, {Name: "machine3", Score: framework.MaxNodeScore}, {Name: "machine4", Score: framework.MaxNodeScore}, {Name: "machine5", Score: 40}},
 			name:         "Affinity and Anti Affinity: considering both affinity and anti-affinity, the pod to schedule and existing pods have the same labels",
 		},
 		// Consider Affinity, Anti Affinity and symmetry together.
@@ -504,7 +493,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine3", Labels: labelRgIndia}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine4", Labels: labelAzAz2}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: schedulerapi.MaxPriority}, {Host: "machine2", Score: 0}, {Host: "machine3", Score: schedulerapi.MaxPriority}, {Host: "machine4", Score: 0}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: 0}, {Name: "machine3", Score: framework.MaxNodeScore}, {Name: "machine4", Score: 0}},
 			name:         "Affinity and Anti Affinity and symmetry: considered only preferredDuringSchedulingIgnoredDuringExecution in both pod affinity & anti affinity & symmetry",
 		},
 		// Cover https://github.com/kubernetes/kubernetes/issues/82796 which panics upon:
@@ -520,7 +509,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine1", Labels: labelRgChina}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: labelRgChina}},
 			},
-			expectedList: []schedulerapi.HostPriority{{Host: "machine1", Score: schedulerapi.MaxPriority}, {Host: "machine2", Score: schedulerapi.MaxPriority}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: framework.MaxNodeScore}},
 			name:         "Avoid panic when partial nodes in a topology don't have pods with affinity",
 		},
 	}
@@ -528,7 +517,7 @@ func TestInterPodAffinityPriority(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(test.pods, test.nodes)
 			interPodAffinity := InterPodAffinity{
-				info:                  FakeNodeListInfo(test.nodes),
+				nodeLister:            fakelisters.NodeLister(test.nodes),
 				hardPodAffinityWeight: v1.DefaultHardPodAffinitySymmetricWeight,
 			}
 			list, err := interPodAffinity.CalculateInterPodAffinityPriority(test.pod, nodeNameToInfo, test.nodes)
@@ -578,7 +567,7 @@ func TestHardPodAffinitySymmetricWeight(t *testing.T) {
 		pods                  []*v1.Pod
 		nodes                 []*v1.Node
 		hardPodAffinityWeight int32
-		expectedList          schedulerapi.HostPriorityList
+		expectedList          framework.NodeScoreList
 		name                  string
 	}{
 		{
@@ -593,7 +582,7 @@ func TestHardPodAffinitySymmetricWeight(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine3", Labels: labelAzAz1}},
 			},
 			hardPodAffinityWeight: v1.DefaultHardPodAffinitySymmetricWeight,
-			expectedList:          []schedulerapi.HostPriority{{Host: "machine1", Score: schedulerapi.MaxPriority}, {Host: "machine2", Score: schedulerapi.MaxPriority}, {Host: "machine3", Score: 0}},
+			expectedList:          []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: framework.MaxNodeScore}, {Name: "machine3", Score: 0}},
 			name:                  "Hard Pod Affinity symmetry: hard pod affinity symmetry weights 1 by default, then nodes that match the hard pod affinity symmetry rules, get a high score",
 		},
 		{
@@ -608,7 +597,7 @@ func TestHardPodAffinitySymmetricWeight(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine3", Labels: labelAzAz1}},
 			},
 			hardPodAffinityWeight: 0,
-			expectedList:          []schedulerapi.HostPriority{{Host: "machine1", Score: 0}, {Host: "machine2", Score: 0}, {Host: "machine3", Score: 0}},
+			expectedList:          []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 0}, {Name: "machine3", Score: 0}},
 			name:                  "Hard Pod Affinity symmetry: hard pod affinity symmetry is closed(weights 0), then nodes that match the hard pod affinity symmetry rules, get same score with those not match",
 		},
 	}
@@ -616,7 +605,7 @@ func TestHardPodAffinitySymmetricWeight(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(test.pods, test.nodes)
 			ipa := InterPodAffinity{
-				info:                  FakeNodeListInfo(test.nodes),
+				nodeLister:            fakelisters.NodeLister(test.nodes),
 				hardPodAffinityWeight: test.hardPodAffinityWeight,
 			}
 			list, err := ipa.CalculateInterPodAffinityPriority(test.pod, nodeNameToInfo, test.nodes)
@@ -673,7 +662,7 @@ func BenchmarkInterPodAffinityPriority(b *testing.B) {
 			existingPods, allNodes := tt.prepFunc(tt.existingPodsNum, tt.allNodesNum)
 			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(existingPods, allNodes)
 			interPodAffinity := InterPodAffinity{
-				info:                  FakeNodeListInfo(allNodes),
+				nodeLister:            fakelisters.NodeLister(allNodes),
 				hardPodAffinityWeight: v1.DefaultHardPodAffinitySymmetricWeight,
 			}
 			b.ResetTimer()

@@ -482,7 +482,7 @@ type ProxyServer struct {
 	UseEndpointSlices      bool
 	OOMScoreAdj            *int32
 	ConfigSyncPeriod       time.Duration
-	HealthzServer          *healthcheck.HealthzServer
+	HealthzServer          *healthcheck.ProxierHealthServer
 }
 
 // createClients creates a kube client and an event client from the given config and masterOverride.
@@ -552,6 +552,8 @@ func (s *ProxyServer) Run() error {
 		proxyMux := mux.NewPathRecorderMux("kube-proxy")
 		healthz.InstallHandler(proxyMux)
 		proxyMux.HandleFunc("/proxyMode", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
 			fmt.Fprintf(w, "%s", s.ProxyMode)
 		})
 		proxyMux.Handle("/metrics", legacyregistry.Handler())

@@ -17,6 +17,7 @@ limitations under the License.
 package core
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"reflect"
@@ -26,7 +27,6 @@ import (
 	"testing"
 	"time"
 
-	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,17 +35,20 @@ import (
 	"k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/informers"
+	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm"
 	algorithmpredicates "k8s.io/kubernetes/pkg/scheduler/algorithm/predicates"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm/priorities"
 	priorityutil "k8s.io/kubernetes/pkg/scheduler/algorithm/priorities/util"
 	schedulerapi "k8s.io/kubernetes/pkg/scheduler/api"
 	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
+	extenderv1 "k8s.io/kubernetes/pkg/scheduler/apis/extender/v1"
 	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
 	internalcache "k8s.io/kubernetes/pkg/scheduler/internal/cache"
 	internalqueue "k8s.io/kubernetes/pkg/scheduler/internal/queue"
+	fakelisters "k8s.io/kubernetes/pkg/scheduler/listers/fake"
 	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
-	schedulertesting "k8s.io/kubernetes/pkg/scheduler/testing"
 )
 
 var (
@@ -79,25 +82,25 @@ func hasNoPodsPredicate(pod *v1.Pod, meta algorithmpredicates.PredicateMetadata,
 	return false, []algorithmpredicates.PredicateFailureReason{algorithmpredicates.ErrFakePredicate}, nil
 }
 
-func numericPriority(pod *v1.Pod, nodeNameToInfo map[string]*schedulernodeinfo.NodeInfo, nodes []*v1.Node) (schedulerapi.HostPriorityList, error) {
-	result := []schedulerapi.HostPriority{}
+func numericPriority(pod *v1.Pod, nodeNameToInfo map[string]*schedulernodeinfo.NodeInfo, nodes []*v1.Node) (framework.NodeScoreList, error) {
+	result := []framework.NodeScore{}
 	for _, node := range nodes {
 		score, err := strconv.Atoi(node.Name)
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, schedulerapi.HostPriority{
-			Host:  node.Name,
+		result = append(result, framework.NodeScore{
+			Name:  node.Name,
 			Score: int64(score),
 		})
 	}
 	return result, nil
 }
 
-func reverseNumericPriority(pod *v1.Pod, nodeNameToInfo map[string]*schedulernodeinfo.NodeInfo, nodes []*v1.Node) (schedulerapi.HostPriorityList, error) {
+func reverseNumericPriority(pod *v1.Pod, nodeNameToInfo map[string]*schedulernodeinfo.NodeInfo, nodes []*v1.Node) (framework.NodeScoreList, error) {
 	var maxScore float64
 	minScore := math.MaxFloat64
-	reverseResult := []schedulerapi.HostPriority{}
+	reverseResult := []framework.NodeScore{}
 	result, err := numericPriority(pod, nodeNameToInfo, nodes)
 	if err != nil {
 		return nil, err
@@ -108,8 +111,8 @@ func reverseNumericPriority(pod *v1.Pod, nodeNameToInfo map[string]*schedulernod
 		minScore = math.Min(minScore, float64(hostPriority.Score))
 	}
 	for _, hostPriority := range result {
-		reverseResult = append(reverseResult, schedulerapi.HostPriority{
-			Host:  hostPriority.Host,
+		reverseResult = append(reverseResult, framework.NodeScore{
+			Name:  hostPriority.Name,
 			Score: int64(maxScore + minScore - float64(hostPriority.Score)),
 		})
 	}
@@ -117,20 +120,20 @@ func reverseNumericPriority(pod *v1.Pod, nodeNameToInfo map[string]*schedulernod
 	return reverseResult, nil
 }
 
-func trueMapPriority(pod *v1.Pod, meta interface{}, nodeInfo *schedulernodeinfo.NodeInfo) (schedulerapi.HostPriority, error) {
-	return schedulerapi.HostPriority{
-		Host:  nodeInfo.Node().Name,
+func trueMapPriority(pod *v1.Pod, meta interface{}, nodeInfo *schedulernodeinfo.NodeInfo) (framework.NodeScore, error) {
+	return framework.NodeScore{
+		Name:  nodeInfo.Node().Name,
 		Score: 1,
 	}, nil
 }
 
-func falseMapPriority(pod *v1.Pod, meta interface{}, nodeInfo *schedulernodeinfo.NodeInfo) (schedulerapi.HostPriority, error) {
-	return schedulerapi.HostPriority{}, errPrioritize
+func falseMapPriority(pod *v1.Pod, meta interface{}, nodeInfo *schedulernodeinfo.NodeInfo) (framework.NodeScore, error) {
+	return framework.NodeScore{}, errPrioritize
 }
 
-func getNodeReducePriority(pod *v1.Pod, meta interface{}, nodeNameToInfo map[string]*schedulernodeinfo.NodeInfo, result schedulerapi.HostPriorityList) error {
+func getNodeReducePriority(pod *v1.Pod, meta interface{}, nodeNameToInfo map[string]*schedulernodeinfo.NodeInfo, result framework.NodeScoreList) error {
 	for _, host := range result {
-		if host.Host == "" {
+		if host.Name == "" {
 			return fmt.Errorf("unexpected empty host name")
 		}
 	}
@@ -160,7 +163,7 @@ func (fp *FakeFilterPlugin) reset() {
 
 // Filter is a test function that returns an error or nil, depending on the
 // value of "failedNodeReturnCodeMap".
-func (fp *FakeFilterPlugin) Filter(pc *framework.PluginContext, pod *v1.Pod, nodeInfo *schedulernodeinfo.NodeInfo) *framework.Status {
+func (fp *FakeFilterPlugin) Filter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeInfo *schedulernodeinfo.NodeInfo) *framework.Status {
 	atomic.AddInt32(&fp.numFilterCalled, 1)
 
 	if returnCode, ok := fp.failedNodeReturnCodeMap[nodeInfo.Node().Name]; ok {
@@ -189,45 +192,45 @@ func TestSelectHost(t *testing.T) {
 	scheduler := genericScheduler{}
 	tests := []struct {
 		name          string
-		list          schedulerapi.HostPriorityList
+		list          framework.NodeScoreList
 		possibleHosts sets.String
 		expectsErr    bool
 	}{
 		{
 			name: "unique properly ordered scores",
-			list: []schedulerapi.HostPriority{
-				{Host: "machine1.1", Score: 1},
-				{Host: "machine2.1", Score: 2},
+			list: []framework.NodeScore{
+				{Name: "machine1.1", Score: 1},
+				{Name: "machine2.1", Score: 2},
 			},
 			possibleHosts: sets.NewString("machine2.1"),
 			expectsErr:    false,
 		},
 		{
 			name: "equal scores",
-			list: []schedulerapi.HostPriority{
-				{Host: "machine1.1", Score: 1},
-				{Host: "machine1.2", Score: 2},
-				{Host: "machine1.3", Score: 2},
-				{Host: "machine2.1", Score: 2},
+			list: []framework.NodeScore{
+				{Name: "machine1.1", Score: 1},
+				{Name: "machine1.2", Score: 2},
+				{Name: "machine1.3", Score: 2},
+				{Name: "machine2.1", Score: 2},
 			},
 			possibleHosts: sets.NewString("machine1.2", "machine1.3", "machine2.1"),
 			expectsErr:    false,
 		},
 		{
 			name: "out of order scores",
-			list: []schedulerapi.HostPriority{
-				{Host: "machine1.1", Score: 3},
-				{Host: "machine1.2", Score: 3},
-				{Host: "machine2.1", Score: 2},
-				{Host: "machine3.1", Score: 1},
-				{Host: "machine1.3", Score: 3},
+			list: []framework.NodeScore{
+				{Name: "machine1.1", Score: 3},
+				{Name: "machine1.2", Score: 3},
+				{Name: "machine2.1", Score: 2},
+				{Name: "machine3.1", Score: 1},
+				{Name: "machine1.3", Score: 3},
 			},
 			possibleHosts: sets.NewString("machine1.1", "machine1.2", "machine1.3"),
 			expectsErr:    false,
 		},
 		{
 			name:          "empty priority list",
-			list:          []schedulerapi.HostPriority{},
+			list:          []framework.NodeScore{},
 			possibleHosts: sets.NewString(),
 			expectsErr:    true,
 		},
@@ -639,6 +642,9 @@ func TestGenericScheduler(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			client := clientsetfake.NewSimpleClientset()
+			informerFactory := informers.NewSharedInformerFactory(client, 0)
+
 			filterPlugin.failedNodeReturnCodeMap = test.filterFailedNodeReturnCodeMap
 
 			cache := internalcache.New(time.Duration(0), wait.NeverStop)
@@ -651,7 +657,7 @@ func TestGenericScheduler(t *testing.T) {
 			pvcs := []*v1.PersistentVolumeClaim{}
 			pvcs = append(pvcs, test.pvcs...)
 
-			pvcLister := schedulertesting.FakePersistentVolumeClaimLister(pvcs)
+			pvcLister := fakelisters.PersistentVolumeClaimLister(pvcs)
 
 			predMetaProducer := algorithmpredicates.EmptyPredicateMetadataProducer
 			if test.buildPredMeta {
@@ -668,12 +674,12 @@ func TestGenericScheduler(t *testing.T) {
 				[]algorithm.SchedulerExtender{},
 				nil,
 				pvcLister,
-				schedulertesting.FakePDBLister{},
+				informerFactory.Policy().V1beta1().PodDisruptionBudgets().Lister(),
 				test.alwaysCheckAllPredicates,
 				false,
 				schedulerapi.DefaultPercentageOfNodesToScore,
 				false)
-			result, err := scheduler.Schedule(framework.NewPluginContext(), test.pod)
+			result, err := scheduler.Schedule(context.Background(), framework.NewCycleState(), test.pod)
 			if !reflect.DeepEqual(err, test.wErr) {
 				t.Errorf("Unexpected error: %v, expected: %v", err.Error(), test.wErr)
 			}
@@ -718,7 +724,7 @@ func TestFindFitAllError(t *testing.T) {
 	nodes := makeNodeList([]string{"3", "2", "1"})
 	scheduler := makeScheduler(predicates, nodes)
 
-	_, predicateMap, _, err := scheduler.findNodesThatFit(nil, &v1.Pod{})
+	_, predicateMap, _, err := scheduler.findNodesThatFit(context.Background(), framework.NewCycleState(), &v1.Pod{})
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -748,7 +754,7 @@ func TestFindFitSomeError(t *testing.T) {
 	scheduler := makeScheduler(predicates, nodes)
 
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "1", UID: types.UID("1")}}
-	_, predicateMap, _, err := scheduler.findNodesThatFit(nil, pod)
+	_, predicateMap, _, err := scheduler.findNodesThatFit(context.Background(), framework.NewCycleState(), pod)
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -829,7 +835,7 @@ func TestFindFitPredicateCallCounts(t *testing.T) {
 		cache.UpdateNodeInfoSnapshot(scheduler.nodeInfoSnapshot)
 		queue.UpdateNominatedPodForNode(&v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID("nominated")}, Spec: v1.PodSpec{Priority: &midPriority}}, "1")
 
-		_, _, _, err := scheduler.findNodesThatFit(nil, test.pod)
+		_, _, _, err := scheduler.findNodesThatFit(context.Background(), framework.NewCycleState(), test.pod)
 
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
@@ -945,7 +951,7 @@ func TestZeroRequest(t *testing.T) {
 				{Spec: large1}, {Spec: noResources1},
 				{Spec: large2}, {Spec: small2},
 			},
-			expectedScore: 25,
+			expectedScore: 250,
 		},
 		{
 			pod:   &v1.Pod{Spec: small},
@@ -955,7 +961,7 @@ func TestZeroRequest(t *testing.T) {
 				{Spec: large1}, {Spec: noResources1},
 				{Spec: large2}, {Spec: small2},
 			},
-			expectedScore: 25,
+			expectedScore: 250,
 		},
 		// The point of this test is to verify that we're not just getting the same score no matter what we schedule.
 		{
@@ -966,12 +972,15 @@ func TestZeroRequest(t *testing.T) {
 				{Spec: large1}, {Spec: noResources1},
 				{Spec: large2}, {Spec: small2},
 			},
-			expectedScore: 23,
+			expectedScore: 230,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			client := clientsetfake.NewSimpleClientset()
+			informerFactory := informers.NewSharedInformerFactory(client, 0)
+
 			// This should match the configuration in defaultPriorities() in
 			// pkg/scheduler/algorithmprovider/defaults/defaults.go if you want
 			// to test what's actually in production.
@@ -980,25 +989,29 @@ func TestZeroRequest(t *testing.T) {
 				{Map: priorities.BalancedResourceAllocationMap, Weight: 1},
 			}
 			selectorSpreadPriorityMap, selectorSpreadPriorityReduce := priorities.NewSelectorSpreadPriority(
-				schedulertesting.FakeServiceLister([]*v1.Service{}),
-				schedulertesting.FakeControllerLister([]*v1.ReplicationController{}),
-				schedulertesting.FakeReplicaSetLister([]*apps.ReplicaSet{}),
-				schedulertesting.FakeStatefulSetLister([]*apps.StatefulSet{}))
+				informerFactory.Core().V1().Services().Lister(),
+				informerFactory.Core().V1().ReplicationControllers().Lister(),
+				informerFactory.Apps().V1().ReplicaSets().Lister(),
+				informerFactory.Apps().V1().StatefulSets().Lister(),
+			)
 			pc := priorities.PriorityConfig{Map: selectorSpreadPriorityMap, Reduce: selectorSpreadPriorityReduce, Weight: 1}
 			priorityConfigs = append(priorityConfigs, pc)
 
 			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(test.pods, test.nodes)
 
 			metaDataProducer := priorities.NewPriorityMetadataFactory(
-				schedulertesting.FakeServiceLister([]*v1.Service{}),
-				schedulertesting.FakeControllerLister([]*v1.ReplicationController{}),
-				schedulertesting.FakeReplicaSetLister([]*apps.ReplicaSet{}),
-				schedulertesting.FakeStatefulSetLister([]*apps.StatefulSet{}))
+				informerFactory.Core().V1().Services().Lister(),
+				informerFactory.Core().V1().ReplicationControllers().Lister(),
+				informerFactory.Apps().V1().ReplicaSets().Lister(),
+				informerFactory.Apps().V1().StatefulSets().Lister(),
+			)
+
 			metaData := metaDataProducer(test.pod, nodeNameToInfo)
 
 			list, err := PrioritizeNodes(
+				context.Background(),
 				test.pod, nodeNameToInfo, metaData, priorityConfigs,
-				schedulertesting.FakeNodeLister(test.nodes), []algorithm.SchedulerExtender{}, emptyFramework, nil)
+				test.nodes, []algorithm.SchedulerExtender{}, emptyFramework, framework.NewCycleState())
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -1011,7 +1024,7 @@ func TestZeroRequest(t *testing.T) {
 	}
 }
 
-func printNodeToVictims(nodeToVictims map[*v1.Node]*schedulerapi.Victims) string {
+func printNodeToVictims(nodeToVictims map[*v1.Node]*extenderv1.Victims) string {
 	var output string
 	for node, victims := range nodeToVictims {
 		output += node.Name + ": ["
@@ -1023,7 +1036,7 @@ func printNodeToVictims(nodeToVictims map[*v1.Node]*schedulerapi.Victims) string
 	return output
 }
 
-func checkPreemptionVictims(expected map[string]map[string]bool, nodeToPods map[*v1.Node]*schedulerapi.Victims) error {
+func checkPreemptionVictims(expected map[string]map[string]bool, nodeToPods map[*v1.Node]*extenderv1.Victims) error {
 	if len(expected) == len(nodeToPods) {
 		for k, victims := range nodeToPods {
 			if expPods, ok := expected[k.Name]; ok {
@@ -1049,17 +1062,6 @@ func checkPreemptionVictims(expected map[string]map[string]bool, nodeToPods map[
 		return fmt.Errorf("unexpected number of machines. expected: %v, got: %v", expected, printNodeToVictims(nodeToPods))
 	}
 	return nil
-}
-
-type FakeNodeInfo v1.Node
-
-func (n FakeNodeInfo) GetNodeInfo(nodeName string) (*v1.Node, error) {
-	node := v1.Node(n)
-	return &node, nil
-}
-
-func PredicateMetadata(p *v1.Pod, nodeInfo map[string]*schedulernodeinfo.NodeInfo) algorithmpredicates.PredicateMetadata {
-	return algorithmpredicates.GetPredicateMetadata(p, nodeInfo)
 }
 
 var smallContainers = []v1.Container{
@@ -1371,6 +1373,9 @@ func TestSelectNodesForPreemption(t *testing.T) {
 	labelKeys := []string{"hostname", "zone", "region"}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			client := clientsetfake.NewSimpleClientset()
+			informerFactory := informers.NewSharedInformerFactory(client, 0)
+
 			filterFailedNodeReturnCodeMap := map[string]framework.Code{}
 			cache := internalcache.New(time.Duration(0), wait.NeverStop)
 			for _, pod := range test.pods {
@@ -1381,21 +1386,19 @@ func TestSelectNodesForPreemption(t *testing.T) {
 				cache.AddNode(&v1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"hostname": name}}})
 			}
 
-			predMetaProducer := algorithmpredicates.EmptyPredicateMetadataProducer
-
 			filterPlugin.failedNodeReturnCodeMap = filterFailedNodeReturnCodeMap
 			scheduler := NewGenericScheduler(
 				nil,
 				internalqueue.NewSchedulingQueue(nil, nil),
 				test.predicates,
-				predMetaProducer,
+				algorithmpredicates.GetPredicateMetadata,
 				nil,
 				priorities.EmptyPriorityMetadataProducer,
 				filterFramework,
 				[]algorithm.SchedulerExtender{},
 				nil,
 				nil,
-				schedulertesting.FakePDBLister{},
+				informerFactory.Policy().V1beta1().PodDisruptionBudgets().Lister(),
 				false,
 				false,
 				schedulerapi.DefaultPercentageOfNodesToScore,
@@ -1417,7 +1420,9 @@ func TestSelectNodesForPreemption(t *testing.T) {
 				nodes = append(nodes, node)
 			}
 			if test.addAffinityPredicate {
-				test.predicates[algorithmpredicates.MatchInterPodAffinityPred] = algorithmpredicates.NewPodAffinityPredicate(FakeNodeInfo(*nodes[0]), schedulertesting.FakePodLister(test.pods))
+				n := fakelisters.NodeLister([]*v1.Node{nodes[0]})
+				p := fakelisters.PodLister(test.pods)
+				test.predicates[algorithmpredicates.MatchInterPodAffinityPred] = algorithmpredicates.NewPodAffinityPredicate(n, p)
 			}
 			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(test.pods, nodes)
 			// newnode simulate a case that a new node is added to the cluster, but nodeNameToInfo
@@ -1425,8 +1430,9 @@ func TestSelectNodesForPreemption(t *testing.T) {
 			newnode := makeNode("newnode", 1000*5, priorityutil.DefaultMemoryRequest*5)
 			newnode.ObjectMeta.Labels = map[string]string{"hostname": "newnode"}
 			nodes = append(nodes, newnode)
-			pluginContext := framework.NewPluginContext()
-			nodeToPods, err := g.selectNodesForPreemption(pluginContext, test.pod, nodeNameToInfo, nodes, test.predicates, PredicateMetadata, nil, nil)
+			state := framework.NewCycleState()
+			g.nodeInfoSnapshot.NodeInfoMap = nodeNameToInfo
+			nodeToPods, err := g.selectNodesForPreemption(context.Background(), state, test.pod, nodes, nil)
 			if err != nil {
 				t.Error(err)
 			}
@@ -1640,17 +1646,21 @@ func TestPickOneNodeForPreemption(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			g := &genericScheduler{
-				framework: emptyFramework,
+				framework:             emptyFramework,
+				predicates:            test.predicates,
+				predicateMetaProducer: algorithmpredicates.GetPredicateMetadata,
 			}
 			assignDefaultStartTime(test.pods)
+			g.nodeInfoSnapshot = g.framework.NodeInfoSnapshot()
 
 			nodes := []*v1.Node{}
 			for _, n := range test.nodes {
 				nodes = append(nodes, makeNode(n, priorityutil.DefaultMilliCPURequest*5, priorityutil.DefaultMemoryRequest*5))
 			}
 			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(test.pods, nodes)
-			pluginContext := framework.NewPluginContext()
-			candidateNodes, _ := g.selectNodesForPreemption(pluginContext, test.pod, nodeNameToInfo, nodes, test.predicates, PredicateMetadata, nil, nil)
+			state := framework.NewCycleState()
+			g.nodeInfoSnapshot.NodeInfoMap = nodeNameToInfo
+			candidateNodes, _ := g.selectNodesForPreemption(context.Background(), state, test.pod, nodes, nil)
 			node := pickOneNodeForPreemption(candidateNodes)
 			found := false
 			for _, nodeName := range test.expected {
@@ -1794,7 +1804,7 @@ func TestNodesWherePreemptionMightHelp(t *testing.T) {
 				FailedPredicates:      test.failedPredMap,
 				FilteredNodesStatuses: test.nodesStatuses,
 			}
-			nodes := nodesWherePreemptionMightHelp(makeNodeList(nodeNames), &fitErr)
+			nodes := nodesWherePreemptionMightHelp(schedulernodeinfo.CreateNodeNameToInfoMap(nil, makeNodeList(nodeNames)), &fitErr)
 			if len(test.expected) != len(nodes) {
 				t.Errorf("number of nodes is not the same as expected. exptectd: %d, got: %d. Nodes: %v", len(test.expected), len(nodes), nodes)
 			}
@@ -2076,6 +2086,9 @@ func TestPreempt(t *testing.T) {
 	labelKeys := []string{"hostname", "zone", "region"}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			client := clientsetfake.NewSimpleClientset()
+			informerFactory := informers.NewSharedInformerFactory(client, 0)
+
 			t.Logf("===== Running test %v", t.Name())
 			stop := make(chan struct{})
 			cache := internalcache.New(time.Duration(0), stop)
@@ -2128,20 +2141,20 @@ func TestPreempt(t *testing.T) {
 				emptyFramework,
 				extenders,
 				nil,
-				schedulertesting.FakePersistentVolumeClaimLister{},
-				schedulertesting.FakePDBLister{},
+				informerFactory.Core().V1().PersistentVolumeClaims().Lister(),
+				informerFactory.Policy().V1beta1().PodDisruptionBudgets().Lister(),
 				false,
 				false,
 				schedulerapi.DefaultPercentageOfNodesToScore,
 				true)
-			pluginContext := framework.NewPluginContext()
+			state := framework.NewCycleState()
 			scheduler.(*genericScheduler).snapshot()
 			// Call Preempt and check the expected results.
 			failedPredMap := defaultFailedPredMap
 			if test.failedPredMap != nil {
 				failedPredMap = test.failedPredMap
 			}
-			node, victims, _, err := scheduler.Preempt(pluginContext, test.pod, error(&FitError{Pod: test.pod, FailedPredicates: failedPredMap}))
+			node, victims, _, err := scheduler.Preempt(context.Background(), state, test.pod, error(&FitError{Pod: test.pod, FailedPredicates: failedPredMap}))
 			if err != nil {
 				t.Errorf("unexpected error in preemption: %v", err)
 			}
@@ -2171,7 +2184,7 @@ func TestPreempt(t *testing.T) {
 				test.pod.Status.NominatedNodeName = node.Name
 			}
 			// Call preempt again and make sure it doesn't preempt any more pods.
-			node, victims, _, err = scheduler.Preempt(pluginContext, test.pod, error(&FitError{Pod: test.pod, FailedPredicates: failedPredMap}))
+			node, victims, _, err = scheduler.Preempt(context.Background(), state, test.pod, error(&FitError{Pod: test.pod, FailedPredicates: failedPredMap}))
 			if err != nil {
 				t.Errorf("unexpected error in preemption: %v", err)
 			}

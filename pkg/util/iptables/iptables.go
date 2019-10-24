@@ -502,16 +502,22 @@ const (
 // Monitor is part of Interface
 func (runner *runner) Monitor(canary Chain, tables []Table, reloadFunc func(), interval time.Duration, stopCh <-chan struct{}) {
 	for {
-		for _, table := range tables {
-			if _, err := runner.EnsureChain(table, canary); err != nil {
-				klog.Warningf("Could not set up iptables canary %s/%s: %v", string(table), string(canary), err)
-				return
+		_ = utilwait.PollImmediateUntil(interval, func() (bool, error) {
+			for _, table := range tables {
+				if _, err := runner.EnsureChain(table, canary); err != nil {
+					klog.Warningf("Could not set up iptables canary %s/%s: %v", string(table), string(canary), err)
+					return false, nil
+				}
 			}
-		}
+			return true, nil
+		}, stopCh)
 
 		// Poll until stopCh is closed or iptables is flushed
 		err := utilwait.PollUntil(interval, func() (bool, error) {
-			if runner.chainExists(tables[0], canary) {
+			if exists, err := runner.chainExists(tables[0], canary); exists {
+				return false, nil
+			} else if isResourceError(err) {
+				klog.Warningf("Could not check for iptables canary %s/%s: %v", string(tables[0]), string(canary), err)
 				return false, nil
 			}
 			klog.V(2).Infof("iptables canary %s/%s deleted", string(tables[0]), string(canary))
@@ -520,7 +526,7 @@ func (runner *runner) Monitor(canary Chain, tables []Table, reloadFunc func(), i
 			// so we don't start reloading too soon.
 			err := utilwait.PollImmediate(iptablesFlushPollTime, iptablesFlushTimeout, func() (bool, error) {
 				for i := 1; i < len(tables); i++ {
-					if runner.chainExists(tables[i], canary) {
+					if exists, err := runner.chainExists(tables[i], canary); exists || isResourceError(err) {
 						return false, nil
 					}
 				}
@@ -547,14 +553,14 @@ func (runner *runner) Monitor(canary Chain, tables []Table, reloadFunc func(), i
 
 // chainExists is used internally by Monitor; none of the public Interface methods can be
 // used to distinguish "chain exists" from "chain does not exist" with no side effects
-func (runner *runner) chainExists(table Table, chain Chain) bool {
+func (runner *runner) chainExists(table Table, chain Chain) (bool, error) {
 	fullArgs := makeFullArgs(table, chain)
 
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
 
 	_, err := runner.run(opListChain, fullArgs)
-	return err == nil
+	return err == nil, err
 }
 
 type operation string
@@ -573,6 +579,8 @@ func makeFullArgs(table Table, chain Chain, args ...string) []string {
 	return append([]string{string(chain), "-t", string(table)}, args...)
 }
 
+const iptablesVersionPattern = `v([0-9]+(\.[0-9]+)+)`
+
 // getIPTablesVersion runs "iptables --version" and parses the returned version
 func getIPTablesVersion(exec utilexec.Interface, protocol Protocol) (*utilversion.Version, error) {
 	// this doesn't access mutable state so we don't need to use the interface / runner
@@ -581,7 +589,7 @@ func getIPTablesVersion(exec utilexec.Interface, protocol Protocol) (*utilversio
 	if err != nil {
 		return nil, err
 	}
-	versionMatcher := regexp.MustCompile("v([0-9]+(\\.[0-9]+)+)")
+	versionMatcher := regexp.MustCompile(iptablesVersionPattern)
 	match := versionMatcher.FindStringSubmatch(string(bytes))
 	if match == nil {
 		return nil, fmt.Errorf("no iptables version found in string: %s", bytes)
@@ -641,7 +649,7 @@ func getIPTablesRestoreVersionString(exec utilexec.Interface, protocol Protocol)
 	if err != nil {
 		return "", err
 	}
-	versionMatcher := regexp.MustCompile("v([0-9]+(\\.[0-9]+)+)")
+	versionMatcher := regexp.MustCompile(iptablesVersionPattern)
 	match := versionMatcher.FindStringSubmatch(string(bytes))
 	if match == nil {
 		return "", fmt.Errorf("no iptables version found in string: %s", bytes)
@@ -688,4 +696,17 @@ func IsNotFoundError(err error) bool {
 		}
 	}
 	return false
+}
+
+const iptablesStatusResourceProblem = 4
+
+// isResourceError returns true if the error indicates that iptables ran into a "resource
+// problem" and was unable to attempt the request. In particular, this will be true if it
+// times out trying to get the iptables lock.
+func isResourceError(err error) bool {
+	if ee, isExitError := err.(utilexec.ExitError); isExitError {
+		return ee.ExitStatus() == iptablesStatusResourceProblem
+	} else {
+		return false
+	}
 }

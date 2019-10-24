@@ -47,7 +47,6 @@ import (
 
 const (
 	imageWatcherStr = "watcher="
-	imageSizeStr    = "size "
 	kubeLockMagic   = "kubelet_lock_magic_"
 	// The following three values are used for 30 seconds timeout
 	// while waiting for RBD Watcher to expire.
@@ -570,10 +569,6 @@ func (util *RBDUtil) cleanOldRBDFile(plugin *rbdPlugin, rbdFile string) error {
 		return fmt.Errorf("rbd: decode err: %v.", err)
 	}
 
-	if err != nil {
-		klog.Errorf("failed to load rbd info from %s: %v", rbdFile, err)
-		return err
-	}
 	// Remove rbd lock if found.
 	// The disk is not attached to this node anymore, so the lock on image
 	// for this node can be removed safely.
@@ -708,7 +703,7 @@ func (util *RBDUtil) rbdInfo(b *rbdMounter) (int, error) {
 	//
 	klog.V(4).Infof("rbd: info %s using mon %s, pool %s id %s key %s", b.Image, mon, b.Pool, id, secret)
 	output, err = b.exec.Run("rbd",
-		"info", b.Image, "--pool", b.Pool, "-m", mon, "--id", id, "--key="+secret, "--format=json")
+		"info", b.Image, "--pool", b.Pool, "-m", mon, "--id", id, "--key="+secret, "-k=/dev/null", "--format=json")
 
 	if err, ok := err.(*exec.Error); ok {
 		if err.Err == exec.ErrNotFound {

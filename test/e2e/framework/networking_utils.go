@@ -32,7 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
-	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -591,7 +590,8 @@ func (config *NetworkingTestConfig) setup(selector map[string]string) {
 
 	ginkgo.By("Getting node addresses")
 	ExpectNoError(WaitForAllNodesSchedulable(config.f.ClientSet, 10*time.Minute))
-	nodeList := GetReadySchedulableNodesOrDie(config.f.ClientSet)
+	nodeList, err := e2enode.GetReadySchedulableNodes(config.f.ClientSet)
+	ExpectNoError(err)
 	config.ExternalAddrs = e2enode.FirstAddress(nodeList, v1.NodeExternalIP)
 
 	SkipUnlessNodeCountIsAtLeast(2)
@@ -620,28 +620,11 @@ func (config *NetworkingTestConfig) setup(selector map[string]string) {
 	}
 }
 
-// shuffleNodes copies nodes from the specified slice into a copy in random
-// order. It returns a new slice.
-func shuffleNodes(nodes []v1.Node) []v1.Node {
-	shuffled := make([]v1.Node, len(nodes))
-	perm := rand.Perm(len(nodes))
-	for i, j := range perm {
-		shuffled[j] = nodes[i]
-	}
-	return shuffled
-}
-
 func (config *NetworkingTestConfig) createNetProxyPods(podName string, selector map[string]string) []*v1.Pod {
 	ExpectNoError(WaitForAllNodesSchedulable(config.f.ClientSet, 10*time.Minute))
-	nodeList := GetReadySchedulableNodesOrDie(config.f.ClientSet)
-
-	// To make this test work reasonably fast in large clusters,
-	// we limit the number of NetProxyPods to no more than
-	// maxNetProxyPodsCount on random nodes.
-	nodes := shuffleNodes(nodeList.Items)
-	if len(nodes) > maxNetProxyPodsCount {
-		nodes = nodes[:maxNetProxyPodsCount]
-	}
+	nodeList, err := e2enode.GetBoundedReadySchedulableNodes(config.f.ClientSet, maxNetProxyPodsCount)
+	ExpectNoError(err)
+	nodes := nodeList.Items
 
 	// create pods, one for each node
 	createdPods := make([]*v1.Pod, 0, len(nodes))
@@ -698,25 +681,6 @@ func (config *NetworkingTestConfig) getPodClient() *PodClient {
 
 func (config *NetworkingTestConfig) getServiceClient() coreclientset.ServiceInterface {
 	return config.f.ClientSet.CoreV1().Services(config.Namespace)
-}
-
-// CheckReachabilityFromPod checks reachability from the specified pod.
-func CheckReachabilityFromPod(expectToBeReachable bool, timeout time.Duration, namespace, pod, target string) {
-	cmd := fmt.Sprintf("wget -T 5 -qO- %q", target)
-	err := wait.PollImmediate(Poll, timeout, func() (bool, error) {
-		_, err := RunHostCmd(namespace, pod, cmd)
-		if expectToBeReachable && err != nil {
-			Logf("Expect target to be reachable. But got err: %v. Retry until timeout", err)
-			return false, nil
-		}
-
-		if !expectToBeReachable && err == nil {
-			Logf("Expect target NOT to be reachable. But it is reachable. Retry until timeout")
-			return false, nil
-		}
-		return true, nil
-	})
-	ExpectNoError(err)
 }
 
 // HTTPPokeParams is a struct for HTTP poke parameters.
@@ -994,49 +958,6 @@ func PokeUDP(host string, port int, request string, params *UDPPokeParams) UDPPo
 	ret.Status = UDPSuccess
 	Logf("Poke(%q): success", url)
 	return ret
-}
-
-// TestHitNodesFromOutside checkes HTTP connectivity from outside.
-func TestHitNodesFromOutside(externalIP string, httpPort int32, timeout time.Duration, expectedHosts sets.String) error {
-	return TestHitNodesFromOutsideWithCount(externalIP, httpPort, timeout, expectedHosts, 1)
-}
-
-// TestHitNodesFromOutsideWithCount checkes HTTP connectivity from outside with count.
-func TestHitNodesFromOutsideWithCount(externalIP string, httpPort int32, timeout time.Duration, expectedHosts sets.String,
-	countToSucceed int) error {
-	Logf("Waiting up to %v for satisfying expectedHosts for %v times", timeout, countToSucceed)
-	hittedHosts := sets.NewString()
-	count := 0
-	condition := func() (bool, error) {
-		result := PokeHTTP(externalIP, int(httpPort), "/hostname", &HTTPPokeParams{Timeout: 1 * time.Second})
-		if result.Status != HTTPSuccess {
-			return false, nil
-		}
-
-		hittedHost := strings.TrimSpace(string(result.Body))
-		if !expectedHosts.Has(hittedHost) {
-			Logf("Error hitting unexpected host: %v, reset counter: %v", hittedHost, count)
-			count = 0
-			return false, nil
-		}
-		if !hittedHosts.Has(hittedHost) {
-			hittedHosts.Insert(hittedHost)
-			Logf("Missing %+v, got %+v", expectedHosts.Difference(hittedHosts), hittedHosts)
-		}
-		if hittedHosts.Equal(expectedHosts) {
-			count++
-			if count >= countToSucceed {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-
-	if err := wait.Poll(time.Second, timeout, condition); err != nil {
-		return fmt.Errorf("error waiting for expectedHosts: %v, hittedHosts: %v, count: %v, expected count: %v",
-			expectedHosts, hittedHosts, count, countToSucceed)
-	}
-	return nil
 }
 
 // TestUnderTemporaryNetworkFailure blocks outgoing network traffic on 'node'. Then runs testFunc and returns its status.

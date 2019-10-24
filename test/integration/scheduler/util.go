@@ -17,18 +17,20 @@ limitations under the License.
 package scheduler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	policy "k8s.io/api/policy/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -48,71 +50,55 @@ import (
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/controller/disruption"
 	"k8s.io/kubernetes/pkg/scheduler"
+	latestschedulerapi "k8s.io/kubernetes/pkg/scheduler/api/latest"
 	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
 
 	// Register defaults in pkg/scheduler/algorithmprovider.
 	_ "k8s.io/kubernetes/pkg/scheduler/algorithmprovider"
 	schedulerapi "k8s.io/kubernetes/pkg/scheduler/api"
-	"k8s.io/kubernetes/pkg/scheduler/factory"
-	schedulerplugins "k8s.io/kubernetes/pkg/scheduler/framework/plugins"
-	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
 	taintutils "k8s.io/kubernetes/pkg/util/taints"
 	"k8s.io/kubernetes/test/integration/framework"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 )
 
 type testContext struct {
-	closeFn             framework.CloseFunc
-	httpServer          *httptest.Server
-	ns                  *v1.Namespace
-	clientSet           *clientset.Clientset
-	informerFactory     informers.SharedInformerFactory
-	schedulerConfigArgs *factory.ConfigFactoryArgs
-	schedulerConfig     *factory.Config
-	scheduler           *scheduler.Scheduler
-	stopCh              chan struct{}
+	closeFn         framework.CloseFunc
+	httpServer      *httptest.Server
+	ns              *v1.Namespace
+	clientSet       *clientset.Clientset
+	informerFactory informers.SharedInformerFactory
+	scheduler       *scheduler.Scheduler
+	ctx             context.Context
+	cancelFn        context.CancelFunc
 }
 
-// createConfiguratorWithPodInformer creates a configurator for scheduler.
-func createConfiguratorArgsWithPodInformer(
-	schedulerName string,
-	clientSet clientset.Interface,
-	podInformer coreinformers.PodInformer,
-	informerFactory informers.SharedInformerFactory,
-	pluginRegistry schedulerframework.Registry,
-	plugins *schedulerconfig.Plugins,
-	pluginConfig []schedulerconfig.PluginConfig,
-	stopCh <-chan struct{},
-) *factory.ConfigFactoryArgs {
-	return &factory.ConfigFactoryArgs{
-		Client:                         clientSet,
-		NodeInformer:                   informerFactory.Core().V1().Nodes(),
-		PodInformer:                    podInformer,
-		PvInformer:                     informerFactory.Core().V1().PersistentVolumes(),
-		PvcInformer:                    informerFactory.Core().V1().PersistentVolumeClaims(),
-		ReplicationControllerInformer:  informerFactory.Core().V1().ReplicationControllers(),
-		ReplicaSetInformer:             informerFactory.Apps().V1().ReplicaSets(),
-		StatefulSetInformer:            informerFactory.Apps().V1().StatefulSets(),
-		ServiceInformer:                informerFactory.Core().V1().Services(),
-		PdbInformer:                    informerFactory.Policy().V1beta1().PodDisruptionBudgets(),
-		StorageClassInformer:           informerFactory.Storage().V1().StorageClasses(),
-		CSINodeInformer:                informerFactory.Storage().V1beta1().CSINodes(),
-		Registry:                       pluginRegistry,
-		Plugins:                        plugins,
-		PluginConfig:                   pluginConfig,
-		HardPodAffinitySymmetricWeight: v1.DefaultHardPodAffinitySymmetricWeight,
-		DisablePreemption:              false,
-		PercentageOfNodesToScore:       schedulerapi.DefaultPercentageOfNodesToScore,
-		BindTimeoutSeconds:             600,
-		StopCh:                         stopCh,
+func createAlgorithmSourceFromPolicy(policy *schedulerapi.Policy, clientSet clientset.Interface) schedulerconfig.SchedulerAlgorithmSource {
+	policyString := runtime.EncodeOrDie(latestschedulerapi.Codec, policy)
+	configPolicyName := "scheduler-custom-policy-config"
+	policyConfigMap := v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: metav1.NamespaceSystem, Name: configPolicyName},
+		Data:       map[string]string{schedulerconfig.SchedulerPolicyConfigMapKey: policyString},
+	}
+	policyConfigMap.APIVersion = "v1"
+	clientSet.CoreV1().ConfigMaps(metav1.NamespaceSystem).Create(&policyConfigMap)
+
+	return schedulerconfig.SchedulerAlgorithmSource{
+		Policy: &schedulerconfig.SchedulerPolicySource{
+			ConfigMap: &schedulerconfig.SchedulerPolicyConfigMapSource{
+				Namespace: policyConfigMap.Namespace,
+				Name:      policyConfigMap.Name,
+			},
+		},
 	}
 }
 
 // initTestMasterAndScheduler initializes a test environment and creates a master with default
 // configuration.
 func initTestMaster(t *testing.T, nsPrefix string, admission admission.Interface) *testContext {
+	ctx, cancelFunc := context.WithCancel(context.Background())
 	context := testContext{
-		stopCh: make(chan struct{}),
+		ctx:      ctx,
+		cancelFn: cancelFunc,
 	}
 
 	// 1. Create master
@@ -157,8 +143,7 @@ func initTestScheduler(
 	policy *schedulerapi.Policy,
 ) *testContext {
 	// Pod preemption is enabled by default scheduler configuration.
-	return initTestSchedulerWithOptions(t, context, setPodInformer, policy, schedulerplugins.NewDefaultRegistry(),
-		nil, []schedulerconfig.PluginConfig{}, false, time.Second)
+	return initTestSchedulerWithOptions(t, context, setPodInformer, policy, time.Second)
 }
 
 // initTestSchedulerWithOptions initializes a test environment and creates a scheduler with default
@@ -168,11 +153,8 @@ func initTestSchedulerWithOptions(
 	context *testContext,
 	setPodInformer bool,
 	policy *schedulerapi.Policy,
-	pluginRegistry schedulerframework.Registry,
-	plugins *schedulerconfig.Plugins,
-	pluginConfig []schedulerconfig.PluginConfig,
-	disablePreemption bool,
 	resyncPeriod time.Duration,
+	opts ...scheduler.Option,
 ) *testContext {
 	// 1. Create scheduler
 	context.informerFactory = informers.NewSharedInformerFactory(context.clientSet, resyncPeriod)
@@ -181,64 +163,56 @@ func initTestSchedulerWithOptions(
 
 	// create independent pod informer if required
 	if setPodInformer {
-		podInformer = factory.NewPodInformer(context.clientSet, 12*time.Hour)
+		podInformer = scheduler.NewPodInformer(context.clientSet, 12*time.Hour)
 	} else {
 		podInformer = context.informerFactory.Core().V1().Pods()
 	}
-
-	context.schedulerConfigArgs = createConfiguratorArgsWithPodInformer(
-		v1.DefaultSchedulerName, context.clientSet, podInformer, context.informerFactory, pluginRegistry, plugins,
-		pluginConfig, context.stopCh)
-	configFactory := factory.NewConfigFactory(context.schedulerConfigArgs)
-
 	var err error
-
-	if policy != nil {
-		context.schedulerConfig, err = configFactory.CreateFromConfig(*policy)
-	} else {
-		context.schedulerConfig, err = configFactory.Create()
-	}
-
-	if err != nil {
-		t.Fatalf("Couldn't create scheduler config: %v", err)
-	}
-
-	// set DisablePreemption option
-	context.schedulerConfig.DisablePreemption = disablePreemption
 	eventBroadcaster := events.NewBroadcaster(&events.EventSinkImpl{
 		Interface: context.clientSet.EventsV1beta1().Events(""),
 	})
-	context.schedulerConfig.Recorder = eventBroadcaster.NewRecorder(
+	recorder := eventBroadcaster.NewRecorder(
 		legacyscheme.Scheme,
 		v1.DefaultSchedulerName,
 	)
-
-	context.scheduler = scheduler.NewFromConfig(context.schedulerConfig)
-
-	scheduler.AddAllEventHandlers(context.scheduler,
-		v1.DefaultSchedulerName,
-		context.informerFactory.Core().V1().Nodes(),
+	var algorithmSrc schedulerconfig.SchedulerAlgorithmSource
+	if policy != nil {
+		algorithmSrc = createAlgorithmSourceFromPolicy(policy, context.clientSet)
+	} else {
+		provider := schedulerconfig.SchedulerDefaultProviderName
+		algorithmSrc = schedulerconfig.SchedulerAlgorithmSource{
+			Provider: &provider,
+		}
+	}
+	opts = append([]scheduler.Option{scheduler.WithBindTimeoutSeconds(600)}, opts...)
+	context.scheduler, err = scheduler.New(
+		context.clientSet,
+		context.informerFactory,
 		podInformer,
-		context.informerFactory.Core().V1().PersistentVolumes(),
-		context.informerFactory.Core().V1().PersistentVolumeClaims(),
-		context.informerFactory.Core().V1().Services(),
-		context.informerFactory.Storage().V1().StorageClasses(),
-		context.informerFactory.Storage().V1beta1().CSINodes(),
+		recorder,
+		algorithmSrc,
+		context.ctx.Done(),
+		opts...,
 	)
+
+	if err != nil {
+		t.Fatalf("Couldn't create scheduler: %v", err)
+	}
 
 	// set setPodInformer if provided.
 	if setPodInformer {
-		go podInformer.Informer().Run(context.schedulerConfig.StopEverything)
-		cache.WaitForNamedCacheSync("scheduler", context.schedulerConfig.StopEverything, podInformer.Informer().HasSynced)
+		go podInformer.Informer().Run(context.scheduler.StopEverything)
+		cache.WaitForNamedCacheSync("scheduler", context.scheduler.StopEverything, podInformer.Informer().HasSynced)
 	}
 
 	stopCh := make(chan struct{})
 	eventBroadcaster.StartRecordingToSink(stopCh)
 
-	context.informerFactory.Start(context.schedulerConfig.StopEverything)
-	context.informerFactory.WaitForCacheSync(context.schedulerConfig.StopEverything)
+	context.informerFactory.Start(context.scheduler.StopEverything)
+	context.informerFactory.WaitForCacheSync(context.scheduler.StopEverything)
 
-	context.scheduler.Run()
+	go context.scheduler.Run(context.ctx)
+
 	return context
 }
 
@@ -268,9 +242,9 @@ func initDisruptionController(t *testing.T, context *testContext) *disruption.Di
 		mapper,
 		scaleClient)
 
-	informers.Start(context.schedulerConfig.StopEverything)
-	informers.WaitForCacheSync(context.schedulerConfig.StopEverything)
-	go dc.Run(context.schedulerConfig.StopEverything)
+	informers.Start(context.scheduler.StopEverything)
+	informers.WaitForCacheSync(context.scheduler.StopEverything)
+	go dc.Run(context.scheduler.StopEverything)
 	return dc
 }
 
@@ -285,15 +259,14 @@ func initTest(t *testing.T, nsPrefix string) *testContext {
 func initTestDisablePreemption(t *testing.T, nsPrefix string) *testContext {
 	return initTestSchedulerWithOptions(
 		t, initTestMaster(t, nsPrefix, nil), true, nil,
-		schedulerplugins.NewDefaultRegistry(), nil, []schedulerconfig.PluginConfig{},
-		true, time.Second)
+		time.Second, scheduler.WithPreemptionDisabled(true))
 }
 
 // cleanupTest deletes the scheduler and the test namespace. It should be called
 // at the end of a test.
 func cleanupTest(t *testing.T, context *testContext) {
 	// Kill the scheduler.
-	close(context.stopCh)
+	context.cancelFn()
 	// Cleanup nodes.
 	context.clientSet.CoreV1().Nodes().DeleteCollection(nil, metav1.ListOptions{})
 	framework.DeleteTestingNamespace(context.ns, context.httpServer, t)
@@ -413,7 +386,8 @@ func nodeTainted(cs clientset.Interface, nodeName string, taints []v1.Taint) wai
 			return false, err
 		}
 
-		if len(taints) != len(node.Spec.Taints) {
+		// node.Spec.Taints may have more taints
+		if len(taints) > len(node.Spec.Taints) {
 			return false, nil
 		}
 

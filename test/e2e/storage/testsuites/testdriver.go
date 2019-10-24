@@ -94,11 +94,6 @@ type DynamicPVTestDriver interface {
 	// It will set fsType to the StorageClass, if TestDriver supports it.
 	// It will return nil, if the TestDriver doesn't support it.
 	GetDynamicProvisionStorageClass(config *PerTestConfig, fsType string) *storagev1.StorageClass
-
-	// GetClaimSize returns the size of the volume that is to be provisioned ("5Gi", "1Mi").
-	// The size must be chosen so that the resulting volume is large enough for all
-	// enabled tests and within the range supported by the underlying storage.
-	GetClaimSize() string
 }
 
 // EphemeralTestDriver represents an interface for a TestDriver that supports ephemeral inline volumes.
@@ -171,8 +166,10 @@ type DriverInfo struct {
 	InTreePluginName string
 	FeatureTag       string // FeatureTag for the driver
 
-	// Max file size to be tested for this driver
+	// Maximum single file size supported by this driver
 	MaxFileSize int64
+	// The range of disk size supported by this driver
+	SupportedSizeRange volume.SizeRange
 	// Map of string for supported fs type
 	SupportedFsType sets.String
 	// Map of string for supported mount option

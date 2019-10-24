@@ -49,7 +49,7 @@ var (
 	Renewal by default tries to use the certificate authority in the local PKI managed by kubeadm; as alternative
 	it is possible to use K8s certificate API for certificate renewal, or as a last option, to generate a CSR request.
 
-	After renewal, in order to make changes effective, is is required to restart control-plane components and
+	After renewal, in order to make changes effective, is required to restart control-plane components and
 	eventually re-distribute the renewed certificate in case the file is used elsewhere.
 `)
 
@@ -281,9 +281,27 @@ func newCmdCertsExpiration(out io.Writer, kdir string) *cobra.Command {
 				return "no"
 			}
 			w := tabwriter.NewWriter(out, 10, 4, 3, ' ', 0)
-			fmt.Fprintln(w, "CERTIFICATE\tEXPIRES\tRESIDUAL TIME\tEXTERNALLY MANAGED")
+			fmt.Fprintln(w, "CERTIFICATE\tEXPIRES\tRESIDUAL TIME\tCERTIFICATE AUTHORITY\tEXTERNALLY MANAGED")
 			for _, handler := range rm.Certificates() {
-				e, err := rm.GetExpirationInfo(handler.Name)
+				e, err := rm.GetCertificateExpirationInfo(handler.Name)
+				if err != nil {
+					return err
+				}
+
+				s := fmt.Sprintf("%s\t%s\t%s\t%s\t%-8v",
+					e.Name,
+					e.ExpirationDate.Format("Jan 02, 2006 15:04 MST"),
+					duration.ShortHumanDuration(e.ResidualTime()),
+					handler.CAName,
+					yesNo(e.ExternallyManaged),
+				)
+
+				fmt.Fprintln(w, s)
+			}
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "CERTIFICATE AUTHORITY\tEXPIRES\tRESIDUAL TIME\tEXTERNALLY MANAGED")
+			for _, handler := range rm.CAs() {
+				e, err := rm.GetCAExpirationInfo(handler.Name)
 				if err != nil {
 					return err
 				}
