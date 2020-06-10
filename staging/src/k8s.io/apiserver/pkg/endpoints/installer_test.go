@@ -80,16 +80,6 @@ func TestGetArticleForNoun(t *testing.T) {
 			padding: " ",
 			want:    " a ",
 		},
-		{
-			noun:    "S",
-			padding: " ",
-			want:    " a ",
-		},
-		{
-			noun:    "O",
-			padding: " ",
-			want:    " an ",
-		},
 	}
 	for _, tt := range tests {
 		if got := GetArticleForNoun(tt.noun, tt.padding); got != tt.want {

@@ -1158,8 +1158,6 @@ func (az *Cloud) reconcileSecurityGroup(clusterName string, service *v1.Service,
 	}
 	expectedSecurityRules := []network.SecurityRule{}
 
-	ipv6 := utilnet.IsIPv6String(service.Spec.ClusterIP)
-
 	if wantLb {
 		expectedSecurityRules = make([]network.SecurityRule, len(ports)*len(sourceAddressPrefixes))
 
@@ -1171,7 +1169,7 @@ func (az *Cloud) reconcileSecurityGroup(clusterName string, service *v1.Service,
 			for j := range sourceAddressPrefixes {
 				ix := i*len(sourceAddressPrefixes) + j
 				securityRuleName := az.getSecurityRuleName(service, port, sourceAddressPrefixes[j])
-				securityRule := network.SecurityRule{
+				expectedSecurityRules[ix] = network.SecurityRule{
 					Name: to.StringPtr(securityRuleName),
 					SecurityRulePropertiesFormat: &network.SecurityRulePropertiesFormat{
 						Protocol:                 *securityProto,
@@ -1183,13 +1181,6 @@ func (az *Cloud) reconcileSecurityGroup(clusterName string, service *v1.Service,
 						Direction:                network.SecurityRuleDirectionInbound,
 					},
 				}
-				// For IPv6, the destination port needs to be node port and Destination Any as floating IPs
-				// not supported for IPv6
-				if ipv6 {
-					securityRule.SecurityRulePropertiesFormat.DestinationPortRange = to.StringPtr(strconv.Itoa(int(port.NodePort)))
-					securityRule.SecurityRulePropertiesFormat.DestinationAddressPrefix = to.StringPtr("*")
-				}
-				expectedSecurityRules[ix] = securityRule
 			}
 		}
 	}
